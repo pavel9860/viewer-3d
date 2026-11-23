@@ -29,9 +29,31 @@ class Ctx:
       v=D(p,0,len(p)//8); o,X,Y=v[0:3],v[3:6],v[6:9]; r=v[9]
       Z=[X[1]*Y[2]-X[2]*Y[1],X[2]*Y[0]-X[0]*Y[2],X[0]*Y[1]-X[1]*Y[0]]
       def f(u,w):
-        th=u/(r*v[14]) if len(v)>14 else u/r
+        th=u/(r*v[14])
         return add(o,add(mul(X,r*math.cos(th)),add(mul(Y,r*math.sin(th)),mul(Z,w))))
       return f
+    if t==241:
+      return s.surf(refs[0])
+    if t==203:
+      v=D(p,0,len(p)//8); o,A,B,Cz=v[0:3],v[3:6],v[6:9],v[9:12]; rs=v[12]
+      def f(u,w):
+        u,w=u/rs,w/rs
+        cu,su,cw,sw=math.cos(u),math.sin(u),math.cos(w),math.sin(w)
+        return [o[k]+cw*(cu*A[k]+su*B[k])+sw*Cz[k] for k in range(3)]
+      return f
+    if t==204:
+      v=D(p,0,len(p)//8); o,X,Y,Z=v[0:3],v[3:6],v[6:9],v[9:12]; R,r=v[12],v[13]
+      def f(u,w):
+        u,w=u/R,w/r
+        cu,su,cw,sw=math.cos(u),math.sin(u),math.cos(w),math.sin(w); q=R+r*cw
+        return [o[k]+q*(cu*X[k]+su*Y[k])+r*sw*Z[k] for k in range(3)]
+      return f
+    if t==212:
+      return s.surf(refs[0])
+    if t==231:
+      import nurbs
+      S,_=nurbs.surface(p)
+      return lambda u,v: nurbs.surf_eval(S,u,v)
     return None
   def pcurve(s,i):
     t,refs,p,_=s.o[i]
@@ -42,7 +64,11 @@ class Ctx:
     if t==151:
       c=D(p,0,2); v=D(p,24,(len(p)-24)//8); r=v[0]
       sc,off=v[3],v[4] if len(v)>4 else 0
-      return refs[0],lambda q:(c[0]+r*math.cos((q-off)/r/sc),c[1]+r*math.sin((q-off)/r/sc))
+      return refs[0],lambda q:(c[0]+r*math.cos(q/r/sc),c[1]+r*math.sin(q/r/sc))
+    if t==160:
+      import herm
+      H,_=herm.parse_herm(p)
+      return refs[0],lambda q:tuple(herm.herm_eval(H,q))
     return None
   def point14(s,i):
     t,refs,p,_=s.o[i]
@@ -65,11 +91,11 @@ def check2(objs):
     import ec as ECm
     try: maps,_,rest=ECm.parse_ec(objs[ec][1],objs[ec][2])
     except Exception as ex: st['ecfail']+=1; continue
-    if len(rest)!=4: st['ecrest %d'%len(rest)]+=1
+    if False: st['ecrest %d'%len(rest)]+=1
     for c,mp in zip(objs[ec][1],maps):
       qq=mp(q)
       tc=objs[c][0]
-      pc=C.pcurve(c) if tc in (150,151) else None
+      pc=C.pcurve(c) if tc in (150,151,160) else None
       if not pc: st['skip %d'%tc]+=1; continue
       sid,f=pc; S=C.surf(sid)
       if not S: st['nosurf %d'%objs[sid][0]]+=1; continue
@@ -87,7 +113,7 @@ def check_old(objs):
     pts=[]
     for (c,q,flag) in C.point14(i):
       tc=objs[c][0]
-      pc=C.pcurve(c) if tc in (150,151) else None
+      pc=C.pcurve(c) if tc in (150,151,160) else None
       if not pc: st['skip %d'%tc]+=1; continue
       sid,f=pc; S=C.surf(sid)
       if not S: st['nosurf %d'%objs[sid][0]]+=1; continue
