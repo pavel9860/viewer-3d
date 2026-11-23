@@ -26,7 +26,7 @@ use std::time::Instant;
 
 /// CATIA's G1 angular tolerance is about 0.5 degrees
 const ANG_TOL: f64 = 1e-2;
-const WORKERS: usize = 6;
+const WORKERS: usize = 2;
 
 // ------------------------------------------------------------------ model
 struct M { e: HashMap<u32, Ent>, sc: f64, off: V }
