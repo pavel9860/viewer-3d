@@ -1,5 +1,6 @@
 //! Body checker: topology invariants and geometry within tolerance.
-//! Topology: loops close; in a closed shell every edge is used exactly twice with opposite senses.
+//! Topology: loops close; in a closed shell every edge is used by as many forward as reverse coedges (twice for a
+//! manifold edge; 2k times at a non-manifold edge, reported separately).
 //! Geometry: vertices lie on their edge curves, edge curves lie on the surfaces of the faces that use them.
 use crate::geom::{dist, norm, sub};
 use crate::topo::*;
@@ -8,8 +9,10 @@ use std::collections::HashMap;
 #[derive(Default, Debug)]
 pub struct Report {
     pub loops_open: usize,
-    /// closed-shell edges not used exactly twice
+    /// closed-shell edges used once, or with unbalanced senses
     pub edge_use: usize,
+    /// closed-shell edges used 2k > 2 times with balanced senses (non-manifold, valid)
+    pub nonmanifold: usize,
     /// closed-shell edges used twice with the same sense (inconsistent orientation)
     pub orientation: usize,
     pub vertex_off_curve: usize,
@@ -45,7 +48,8 @@ pub fn check(b: &Body, samples: usize, workers: usize) -> Report {
         }
     }
     for s in uses.values() {
-        if s.len() != 2 { r.edge_use += 1; } else if s[0] == s[1] { r.orientation += 1; }
+        let fwd = s.iter().filter(|x| **x).count();
+        if s.len() == 2 && fwd != 1 { r.orientation += 1; } else if 2 * fwd != s.len() { r.edge_use += 1; } else if s.len() > 2 { r.nonmanifold += 1; }
     }
     // geometry, in parallel over edges
     let edges: Vec<(Id<Edge>, Vec<Id<Face>>)> = edge_faces.into_iter().collect();

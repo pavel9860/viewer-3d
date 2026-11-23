@@ -4,12 +4,13 @@ A browser-first B-rep kernel and its research spikes (Rust, WASM). Separate from
 
 ```
 brep/         kernel core: geom (Surf trait, analytic surfaces), nurbs (B-spline, extrusion, revolution), p21, topo (chunked COW arena, typed ids, provenance, tolerances),
-              step (STEP -> Body import), check (topology + geometry validator); `brep check FILE|LIST`
+              step (STEP -> Body import), check (topology + geometry validator), ssi, exact (predicates), trim (faces in UV),
+              make (primitives), mesh (UV triangulation, volume), classify (point in body), boolean (union/intersection/difference on Body);
+              `brep check|bool FILE|LIST`
 kcore/        no_std shared math (PRNG, hash, own sin/sqrt, synthetic + real mesh workloads); native and wasm32
 spike/src/
-  ssi.rs        surface-surface intersection: transversal, branch points, tangential, tolerant contacts
   ssi_cases.rs  hand-made hard cases + randomized analytic stress test
-  exact.rs      adaptive exact orient2d/orient3d (filter, staged, allocation-free exact) + tests
+  pred.rs       exact predicate benchmark
   boolean.rs    boolean spike: shared edges, vertex registry, UV arrangement, classification, closure + volume
   p21.rs        minimal STEP Part 21 parser
   step.rs       edge check against CATIA STEP exports (local or full SSI)
@@ -23,6 +24,7 @@ tools/        export_parts.py (CATIA -> PLY via cadcli)
 ```bash
 cargo build --release -j4
 ./target/release/brep check spike/catia_steps.tsv   # import + validate 15 CATIA STEP files, ~40 s
+./target/release/brep bool FILE.stp 1               # A-B, A^B, AuB of the largest shell with a cylinder (validator + volume identities)
 cargo test --release -j4
 ./target/release/spike ssi                         # 7 hard SSI cases, < 1 s
 ./target/release/spike stress 60                   # 600 random SSI trials, ~9 s

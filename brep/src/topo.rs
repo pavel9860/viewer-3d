@@ -75,6 +75,31 @@ impl Body {
         let e = self.edges.get(ce.edge);
         if ce.sense { (e.v[0], e.v[1]) } else { (e.v[1], e.v[0]) }
     }
+    /// a body made of the given faces (one closed shell), with only the entities they use
+    pub fn extract(&self, faces: &[Id<Face>]) -> Body {
+        let mut b = Body { tol: self.tol, ..Default::default() };
+        let mut vm = std::collections::HashMap::new();
+        let mut em = std::collections::HashMap::new();
+        let mut fs = vec![];
+        for &f in faces {
+            let fc = self.faces.get(f);
+            let loops = fc.loops.iter().map(|&l| {
+                let coedges = self.loops.get(l).coedges.iter().map(|&c| {
+                    let ce = self.coedges.get(c);
+                    let edge = *em.entry(ce.edge).or_insert_with(|| {
+                        let mut e = self.edges.get(ce.edge).clone();
+                        e.v = e.v.map(|v| *vm.entry(v).or_insert_with(|| b.vertices.push(self.vertices.get(v).clone())));
+                        b.edges.push(e)
+                    });
+                    b.coedges.push(Coedge { edge, sense: ce.sense })
+                }).collect();
+                b.loops.push(Loop { coedges })
+            }).collect();
+            fs.push(b.faces.push(Face { loops, ..fc.clone() }));
+        }
+        b.shells.push(Shell { faces: fs, closed: true });
+        b
+    }
     pub fn stats(&self) -> String {
         format!("{} shells, {} faces, {} loops, {} edges, {} vertices", self.shells.len(), self.faces.len(), self.loops.len(), self.edges.len(), self.vertices.len())
     }

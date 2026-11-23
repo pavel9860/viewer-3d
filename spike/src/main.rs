@@ -8,14 +8,13 @@
 //!   spike bench               architecture benchmarks (determinism, transfer, recompute, hashing, naming, assembly)
 mod bench;
 mod boolean;
-mod exact;
 mod k;
-mod ssi;
 mod ssi_cases;
+mod pred;
 mod real;
 mod step;
 
-pub use brep::{geom, nurbs, p21};
+pub use brep::{exact, geom, nurbs, p21, ssi};
 use std::time::Instant;
 pub fn ms(t: Instant) -> f64 { t.elapsed().as_secs_f64() * 1e3 }
 
@@ -25,7 +24,7 @@ fn main() {
         Some("ssi") => ssi_cases::cases(),
         Some("stress") => ssi_cases::stress(args.get(2).and_then(|v| v.parse().ok()).unwrap_or(60)),
         Some("step") => step::run(&args[2..]),
-        Some("pred") => exact::bench(),
+        Some("pred") => pred::bench(),
         Some("bool") => boolean::run(),
         Some("real") => { real::run(&args[2]); 0 }
         Some("bench") => { bench::determinism(); bench::transfer(); bench::incremental(); bench::hashing(); bench::naming(); bench::assembly(); 0 }

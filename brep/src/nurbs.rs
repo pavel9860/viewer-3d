@@ -82,6 +82,62 @@ pub trait Crv: Send + Sync {
     fn periodic(&self) -> bool { false }
     /// closed-form parameter of the closest point, where one exists
     fn param_of(&self, _p: V) -> Option<f64> { None }
+    /// parameters that must appear in any tessellation of [t0, t1] (polyline breakpoints)
+    fn breaks(&self, _t0: f64, _t1: f64) -> Option<Vec<f64>> { None }
+}
+
+/// tessellation parameters of [t0, t1] (either direction): the curve's own breakpoints, else bisection of
+/// 4 spans until each chord is within `sag` of the curve at its midpoint
+pub fn tess(c: &dyn Crv, t0: f64, t1: f64, sag: f64) -> Vec<f64> {
+    if let Some(b) = c.breaks(t0, t1) { return b; }
+    fn rec(c: &dyn Crv, a: (f64, V), b: (f64, V), sag: f64, depth: u32, out: &mut Vec<f64>) {
+        let tm = 0.5 * (a.0 + b.0);
+        let pm = c.ev(tm).0;
+        if depth < 12 && norm(sub(pm, mulv(addv(a.1, b.1), 0.5))) > sag {
+            rec(c, a, (tm, pm), sag, depth + 1, out);
+            rec(c, (tm, pm), b, sag, depth + 1, out);
+        } else { out.push(b.0); }
+    }
+    let mut out = vec![t0];
+    for k in 0..4 {
+        let (a, b) = (t0 + (t1 - t0) * k as f64 / 4.0, t0 + (t1 - t0) * (k + 1) as f64 / 4.0);
+        rec(c, (a, c.ev(a).0), (b, c.ev(b).0), sag, 0, &mut out);
+    }
+    out
+}
+
+/// polyline parameterized by arc length: intersection curves, exact to their edge tolerance
+pub struct PolyC { pub p: Vec<V>, pub s: Vec<f64> }
+impl PolyC {
+    pub fn new(pts: Vec<V>) -> Self {
+        let mut p: Vec<V> = Vec::with_capacity(pts.len());
+        for q in pts { if p.last().map_or(true, |l| norm(sub(q, *l)) > 0.0) { p.push(q); } }
+        let mut s = vec![0.0];
+        for w in p.windows(2) { s.push(s[s.len() - 1] + norm(sub(w[1], w[0]))); }
+        PolyC { p, s }
+    }
+    fn seg(&self, t: f64) -> usize { self.s.partition_point(|&x| x <= t).clamp(1, self.p.len() - 1) - 1 }
+}
+impl Crv for PolyC {
+    fn ev(&self, t: f64) -> (V, V, V) {
+        let i = self.seg(t);
+        let d = mulv(sub(self.p[i + 1], self.p[i]), 1.0 / (self.s[i + 1] - self.s[i]));
+        (addv(self.p[i], mulv(d, t - self.s[i])), d, [0.0; 3])
+    }
+    fn range(&self) -> (f64, f64) { (0.0, self.s[self.s.len() - 1]) }
+    fn param_of(&self, q: V) -> Option<f64> {
+        (0..self.p.len() - 1).map(|i| {
+            let ab = sub(self.p[i + 1], self.p[i]);
+            let u = (dot(sub(q, self.p[i]), ab) / dot(ab, ab)).clamp(0.0, 1.0);
+            (norm(sub(q, addv(self.p[i], mulv(ab, u)))), self.s[i] + u * (self.s[i + 1] - self.s[i]))
+        }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|x| x.1)
+    }
+    fn breaks(&self, t0: f64, t1: f64) -> Option<Vec<f64>> {
+        let (lo, hi) = (t0.min(t1), t0.max(t1));
+        let mut b: Vec<f64> = std::iter::once(lo).chain(self.s.iter().copied().filter(|&x| x > lo && x < hi)).chain(std::iter::once(hi)).collect();
+        if t0 > t1 { b.reverse(); }
+        Some(b)
+    }
 }
 pub struct LineC { pub o: V, pub d: V }
 impl Crv for LineC {
