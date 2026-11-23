@@ -1,14 +1,12 @@
 # kernel
 
-Research spikes for a browser-first B-rep kernel (Rust, WASM). Separate from the format decoders (`../cadcore`, `../catia`).
+A browser-first B-rep kernel and its research spikes (Rust, WASM). Separate from the format decoders (`../cadcore`, `../catia`).
 
 ```
-brep/         kernel core: geom, nurbs, p21, topo (chunked COW arena, typed ids, provenance, tolerances),
+brep/         kernel core: geom (Surf trait, analytic surfaces), nurbs (B-spline, extrusion, revolution), p21, topo (chunked COW arena, typed ids, provenance, tolerances),
               step (STEP -> Body import), check (topology + geometry validator); `brep check FILE|LIST`
 kcore/        no_std shared math (PRNG, hash, own sin/sqrt, synthetic + real mesh workloads); native and wasm32
 spike/src/
-  geom.rs       vectors, Surf trait, analytic surfaces, placement, point inversion
-  nurbs.rs      rational B-spline curves/surfaces, extrusion, revolution
   ssi.rs        surface-surface intersection: transversal, branch points, tangential, tolerant contacts
   ssi_cases.rs  hand-made hard cases + randomized analytic stress test
   exact.rs      adaptive exact orient2d/orient3d (filter, staged, allocation-free exact) + tests
