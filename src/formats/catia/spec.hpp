@@ -28,7 +28,8 @@
 // Relation block (the relation header grammar of OSM streams before version 35):
 //   <head u8>, form f = head & 7; f != 0 and fe next: inline class fe (fe | e5 <blob> <compact>) <name> fe
 //   header token* fe (compact | e5 <blob> | fd <compact>)
-//   (<attribute> (<count> <index < count> <value>* | <value>))* fe
+//   (<attribute> (<count> <index < count> <value>* | <value>))* fe   (an object without chunks: the
+//   empty list is fe or left out, ~200 blocks; the next head is never fe)
 //   value: compact | e5 <blob> <compact> | 7f <a> <n> <id>*n <index>*(n+1)  (path, not followed)
 // Property table: <count> (<name> <type> <value>)*: type 2, 3, 5: compact; 0, 14: none;
 //   13: byte e7+n (n = 1..8; 485 values), a form byte, n bytes.

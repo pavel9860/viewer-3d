@@ -172,6 +172,14 @@ void relation_block(Cur& c, Names& name, Object& o) {
         o.header.push_back(t);
     }
     ++c.k;
+    // An object without chunks has no attributes to relate: its relation list is empty, written as
+    // fe or left out (the next block's head is never fe). Left out after headers of a link and three
+    // numbers (about 200 blocks, CAA electrical and DMU samples), written otherwise.
+    if (o.chunks.empty()) {
+        if (c.peek() == 0xfe) ++c.k;
+        o.preparsed = true;
+        return;
+    }
     while (c.peek() != 0xfe) {
         Relation r;
         r.attr = name(c);
