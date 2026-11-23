@@ -14,4 +14,5 @@ pub mod par;
 pub mod ssi;
 pub mod step;
 pub mod topo;
+pub mod tri;
 pub mod trim;
