@@ -12,5 +12,3 @@ impl Rng {
     /// uniform in [-1, 1)
     pub fn f(&mut self) -> f64 { (self.next() >> 11) as f64 * (1.0 / (1u64 << 53) as f64) * 2.0 - 1.0 }
 }
-#[inline]
-pub fn mix(h: u64, w: u64) -> u64 { let x = (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15); x ^ (x >> 29) }

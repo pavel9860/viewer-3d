@@ -164,7 +164,9 @@ pub fn uv_refine(s: &dyn Surf, p: V, g: [f64; 2]) -> [f64; 2] {
         let det = a11 * a22 - a12 * a12;
         if !(det.abs() > 1e-300) { break; }
         let (du, dv) = ((a22 * f1 - a12 * f2) / det, (a11 * f2 - a12 * f1) / det);
-        let (nu, nv) = ((u - du).clamp(d[0], d[1]), (v - dv).clamp(d[2], d[3]));
+        // periodic parameters wrap, bounded ones clamp to the domain
+        let lim = |x: f64, lo: f64, hi: f64, per: bool| if per { lo + (x - lo).rem_euclid(hi - lo) } else { x.clamp(lo, hi) };
+        let (nu, nv) = (lim(u - du, d[0], d[1], s.per_u()), lim(v - dv, d[2], d[3], s.per_v()));
         let done = (nu - u).abs() + (nv - v).abs() < 1e-16;
         u = nu; v = nv;
         if done { break; }
