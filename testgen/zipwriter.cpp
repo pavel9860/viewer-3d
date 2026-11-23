@@ -68,7 +68,8 @@ std::vector<std::uint8_t> deflate_fixed(const std::uint8_t* d, std::size_t n) {
         if (i + 2 < n) {
             const std::size_t h = hash(i);
             std::int64_t cand = head[h];
-            for (int chain = 0; cand >= 0 && chain < 64 && i - std::size_t(cand) <= kWindow; ++chain, cand = prev[std::size_t(cand)]) {
+            // Up to 16 candidates; a match of 128 bytes is good enough (zlib's "nice length").
+            for (int chain = 0; cand >= 0 && chain < 16 && best_len < 128 && i - std::size_t(cand) <= kWindow; ++chain, cand = prev[std::size_t(cand)]) {
                 std::size_t l = 0;
                 while (l < 258 && i + l < n && d[std::size_t(cand) + l] == d[i + l]) ++l;
                 if (l > best_len) { best_len = l; best_dist = i - std::size_t(cand); }

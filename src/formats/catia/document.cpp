@@ -6,20 +6,6 @@
 #include "cadcore/error.hpp"
 
 namespace cadcore::formats::catia {
-namespace {
-
-std::uint32_t get32(ByteView f, std::size_t at, bool big) {
-    const std::uint8_t* p = f.data + at;
-    return big ? std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3]
-               : std::uint32_t(p[3]) << 24 | std::uint32_t(p[2]) << 16 | std::uint32_t(p[1]) << 8 | p[0];
-}
-
-std::uint16_t get16(ByteView f, std::size_t at, bool big) {
-    return big ? std::uint16_t(f[at] << 8 | f[at + 1]) : std::uint16_t(f[at + 1] << 8 | f[at]);
-}
-
-}  // namespace
-
 std::optional<Uuid> document_uuid(ByteView f) {
     // The table is written in the byte order of the writer's platform (big-endian on UNIX
     // workstations); the GUID itself is a byte string in both.
@@ -33,8 +19,8 @@ std::optional<Uuid> document_uuid(ByteView f) {
         for (std::size_t a = f.find(marker, 32, limit); a != ByteView::npos; a = f.find(marker, a + 1, limit)) {
             const std::size_t s = a - 32;
             if (s + 40 > f.size) continue;
-            if (get16(f, s + 16, big) != 1 || get16(f, s + 18, big) != 0x6c || get32(f, s + 20, big) != 2 || get32(f, s + 28, big) != 0) continue;
-            const std::uint32_t f10 = get32(f, s + 36, big);
+            if (load_u16(f.data + s + 16, big) != 1 || load_u16(f.data + s + 18, big) != 0x6c || load_u32(f.data + s + 20, big) != 2 || load_u32(f.data + s + 28, big) != 0) continue;
+            const std::uint32_t f10 = load_u32(f.data + s + 36, big);
             const std::size_t names = s + 40;
             const std::size_t z1 = f.find(std::string_view("\0", 1), names, f.size);
             if (z1 == ByteView::npos) continue;

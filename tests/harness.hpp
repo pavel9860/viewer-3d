@@ -7,6 +7,12 @@
 //   CAPTURE(value)                    adds "name := value" to failure reports in the current scope
 #pragma once
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
 #include <cstdio>
 #include <exception>
 #include <functional>
@@ -25,22 +31,34 @@ inline std::vector<Case>& registry() {
     static std::vector<Case> r;
     return r;
 }
+// Capture context of the running case (cases run on several threads: thread-local).
 inline std::vector<std::function<std::string()>>& context() {
-    static std::vector<std::function<std::string()>> c;
+    thread_local std::vector<std::function<std::string()>> c;
     return c;
 }
 struct Stats {
-    long assertions = 0, failures = 0;
+    std::atomic<long> assertions{0}, failures{0};
 };
+inline long& case_failures() {  // failures of the case running on this thread
+    thread_local long n = 0;
+    return n;
+}
+inline std::mutex& output() {
+    static std::mutex m;
+    return m;
+}
 inline Stats& stats() {
     static Stats s;
     return s;
 }
 struct RequireFailed {};
 
-inline void report(const char* file, int line, const char* expr, const char* what) {
+inline void report(const char* file, int line, const char* expr, const char* what, const char* threw = nullptr) {
     ++stats().failures;
+    ++case_failures();
+    const std::lock_guard<std::mutex> lock(output());
     std::fprintf(stderr, "%s:%d: FAILED %s( %s )\n", file, line, what, expr);
+    if (threw) std::fprintf(stderr, "    threw: %s\n", threw);
     for (auto& c : context()) std::fprintf(stderr, "    with %s\n", c().c_str());
 }
 
@@ -60,25 +78,46 @@ struct Capture {
     ~Capture() { context().pop_back(); }
 };
 
-inline int run_all() {
-    int failed_cases = 0;
-    for (const Case& c : registry()) {
-        const long before = stats().failures;
-        try {
-            c.fn();
-        } catch (const RequireFailed&) {
-        } catch (const std::exception& e) {
-            ++stats().failures;
-            std::fprintf(stderr, "test case '%s' threw: %s\n", c.name, e.what());
+// Runs every case whose name contains `filter` (all when null) on CADCORE_TEST_JOBS threads
+// (default 4; cases must not share mutable state); lists cases slower than 0.5 s.
+inline int run_all(const char* filter = nullptr) {
+    std::vector<const Case*> cases;
+    for (const Case& c : registry())
+        if (!filter || std::string(c.name).find(filter) != std::string::npos) cases.push_back(&c);
+    std::atomic<std::size_t> next{0};
+    std::atomic<int> failed_cases{0};
+    auto worker = [&] {
+        for (std::size_t i; (i = next++) < cases.size();) {
+            const Case& c = *cases[i];
+            case_failures() = 0;
+            const auto t0 = std::chrono::steady_clock::now();
+            try {
+                c.fn();
+            } catch (const RequireFailed&) {
+            } catch (const std::exception& e) {
+                ++stats().failures;
+                ++case_failures();
+                const std::lock_guard<std::mutex> lock(output());
+                std::fprintf(stderr, "test case '%s' threw: %s\n", c.name, e.what());
+            }
+            context().clear();
+            const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            const std::lock_guard<std::mutex> lock(output());
+            if (sec > 0.5) std::fprintf(stderr, "slow test case (%.1f s): %s\n", sec, c.name);
+            if (case_failures()) {
+                ++failed_cases;
+                std::fprintf(stderr, "  in test case: %s\n", c.name);
+            }
         }
-        context().clear();
-        if (stats().failures != before) {
-            ++failed_cases;
-            std::fprintf(stderr, "  in test case: %s\n", c.name);
-        }
-    }
-    std::printf("test cases: %zu | %d failed\nassertions: %ld | %ld failed\nStatus: %s\n", registry().size(), failed_cases, stats().assertions,
-                stats().failures, stats().failures ? "FAILURE" : "SUCCESS");
+    };
+    const char* env = std::getenv("CADCORE_TEST_JOBS");
+    const int jobs = std::max(1, env ? std::atoi(env) : 4);
+    std::vector<std::thread> pool;
+    for (int j = 1; j < jobs; ++j) pool.emplace_back(worker);
+    worker();
+    for (auto& t : pool) t.join();
+    std::printf("test cases: %zu | %d failed\nassertions: %ld | %ld failed\nStatus: %s\n", cases.size(), failed_cases.load(), stats().assertions.load(),
+                stats().failures.load(), stats().failures ? "FAILURE" : "SUCCESS");
     return stats().failures ? 1 : 0;
 }
 
@@ -107,16 +146,14 @@ inline int run_all() {
     do {                                                                                 \
         ++harness::stats().assertions;                                                   \
         try { expr; } catch (const std::exception& e_) {                                 \
-            harness::report(__FILE__, __LINE__, #expr, "CHECK_NOTHROW");                 \
-            std::fprintf(stderr, "    threw: %s\n", e_.what());                          \
+            harness::report(__FILE__, __LINE__, #expr, "CHECK_NOTHROW", e_.what());     \
         }                                                                                \
     } while (0)
 #define REQUIRE_NOTHROW(expr)                                                            \
     do {                                                                                 \
         ++harness::stats().assertions;                                                   \
         try { expr; } catch (const std::exception& e_) {                                 \
-            harness::report(__FILE__, __LINE__, #expr, "REQUIRE_NOTHROW");               \
-            std::fprintf(stderr, "    threw: %s\n", e_.what());                          \
+            harness::report(__FILE__, __LINE__, #expr, "REQUIRE_NOTHROW", e_.what());   \
             throw harness::RequireFailed{};                                              \
         }                                                                                \
     } while (0)

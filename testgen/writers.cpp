@@ -1,5 +1,6 @@
 // Writers for the canonical models, one per format variant.
 #include <algorithm>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -50,7 +51,12 @@ void put_u32be(Bytes& b, std::uint32_t v) { for (int i = 3; i >= 0; --i) b.push_
 void put_f32le(Bytes& b, float f) { std::uint32_t u; std::memcpy(&u, &f, 4); put_u32le(b, u); }
 void put_f32be(Bytes& b, float f) { std::uint32_t u; std::memcpy(&u, &f, 4); put_u32be(b, u); }
 void put_str(Bytes& b, const std::string& s) { b.insert(b.end(), s.begin(), s.end()); }
-std::string num(double v) { char buf[32]; std::snprintf(buf, sizeof buf, "%.9g", v); return buf; }
+// Same text as printf "%.9g" (to_chars general/precision is specified to match it), several times faster.
+std::string num(double v) {
+    char buf[32];
+    const auto r = std::to_chars(buf, buf + sizeof buf, v, std::chars_format::general, 9);
+    return std::string(buf, r.ptr);
+}
 
 }  // namespace
 

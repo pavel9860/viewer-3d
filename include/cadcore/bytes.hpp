@@ -14,6 +14,13 @@ namespace cadcore {
 // values), then compares the whole needle.
 std::size_t find_bytes(const std::uint8_t* hay, std::size_t n, const std::uint8_t* needle, std::size_t m);
 
+// Unchecked loads in a given byte order (callers check bounds).
+inline std::uint16_t load_u16(const std::uint8_t* p, bool big) { return big ? std::uint16_t(p[0] << 8 | p[1]) : std::uint16_t(p[1] << 8 | p[0]); }
+inline std::uint32_t load_u32(const std::uint8_t* p, bool big) {
+    return big ? std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3]
+               : std::uint32_t(p[3]) << 24 | std::uint32_t(p[2]) << 16 | std::uint32_t(p[1]) << 8 | p[0];
+}
+
 struct ByteView {
     const std::uint8_t* data = nullptr;
     std::size_t size = 0;

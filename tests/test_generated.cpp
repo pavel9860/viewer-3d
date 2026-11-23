@@ -48,11 +48,12 @@ std::set<std::uint32_t> scene_colors(const Scene& sc) {
     return s;
 }
 
-}  // namespace
-
-TEST_CASE("generated parts decode to their analytic geometry in every format") {
+// Decodes every (model, variant) pair selected by `pick` and compares it with the analytic geometry.
+template <class Pick>
+void check_generated(Pick&& pick) {
     for (const Model& model : canonical_models()) {
         for (const Variant& v : variants()) {
+            if (!pick(model, v)) continue;
             const bool catpart = v.id.rfind("catpart", 0) == 0;
             if (catpart && !model.instances.empty()) continue;  // a CATPart has no instances
             if (v.id == "catpart-r17-counts" && model.name == "dense_cylinder35k") continue;  // u16 counts cannot hold a 70002-ref strip
@@ -79,6 +80,22 @@ TEST_CASE("generated parts decode to their analytic geometry in every format") {
             CHECK(sc.warnings.empty());
         }
     }
+}
+
+bool dense(const Model& m) { return m.name == "dense_cylinder35k"; }
+bool text_format(const Variant& v) { return v.id.find("ascii") != std::string::npos || v.id == "obj" || v.id == "3mf"; }
+
+}  // namespace
+
+// Split into independent cases so the harness can run them in parallel.
+TEST_CASE("generated parts decode to their analytic geometry in every format") {
+    check_generated([](const Model& m, const Variant&) { return !dense(m); });
+}
+TEST_CASE("generated dense part decodes to its analytic geometry: text formats") {
+    check_generated([](const Model& m, const Variant& v) { return dense(m) && text_format(v); });
+}
+TEST_CASE("generated dense part decodes to its analytic geometry: binary formats") {
+    check_generated([](const Model& m, const Variant& v) { return dense(m) && !text_format(v); });
 }
 
 TEST_CASE("format detection picks the right decoder from content") {

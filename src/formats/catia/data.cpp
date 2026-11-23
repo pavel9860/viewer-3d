@@ -10,11 +10,6 @@ namespace {
 
 [[noreturn]] void bad(const std::string& what, std::size_t at) { fail(ErrorCode::Malformed, "CATIA Data stream: " + what, at); }
 
-std::uint32_t get32(const std::uint8_t* p, bool big) {
-    return big ? std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3]
-               : std::uint32_t(p[3]) << 24 | std::uint32_t(p[2]) << 16 | std::uint32_t(p[1]) << 8 | p[0];
-}
-std::uint16_t get16(const std::uint8_t* p, bool big) { return big ? std::uint16_t(p[0] << 8 | p[1]) : std::uint16_t(p[1] << 8 | p[0]); }
 
 // NUL-terminated string at `at` within `b`, or the rest of `b`.
 std::string cstr(ByteView b, std::size_t& at) {
@@ -42,18 +37,18 @@ std::optional<DataStream> read_data_stream(ByteView file) {
     const bool big = out.big;
     for (std::size_t a = 0; a < n;) {
         if (a + 16 > n) bad("section header past the stream end", a);
-        const std::uint64_t end = a + 8 * std::uint64_t(get32(d + a + 4, big));
+        const std::uint64_t end = a + 8 * std::uint64_t(load_u32(d + a + 4, big));
         if (end < a + 16 || end > n) bad("section length out of range", a);
-        if (get16(d + a + 8, big) != 1) bad("section without its container header", a + 8);
+        if (load_u16(d + a + 8, big) != 1) bad("section without its container header", a + 8);
         DataSection s;
         s.offset = a;
-        s.kind = get16(d + a + 10, big);
-        s.index = get32(d + a + 12, big);
+        s.kind = load_u16(d + a + 10, big);
+        s.index = load_u32(d + a + 12, big);
         for (std::size_t q = a + 16; q < end;) {
             if (q + 8 > end) bad("item header past its section", q);
-            const std::uint64_t len = 8 * std::uint64_t(get32(d + q + 4, big));
+            const std::uint64_t len = 8 * std::uint64_t(load_u32(d + q + 4, big));
             if (len < 8 || q + len > end) bad("item length out of range", q);
-            DataItem it{get16(d + q, big), q + 8, ByteView(d + q + 8, std::size_t(len - 8))};
+            DataItem it{load_u16(d + q, big), q + 8, ByteView(d + q + 8, std::size_t(len - 8))};
             if (it.tag == 2 && s.cls.empty()) {
                 std::size_t k = 0;
                 s.cls = cstr(it.body, k);

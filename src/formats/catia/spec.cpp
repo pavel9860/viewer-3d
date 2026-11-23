@@ -183,20 +183,22 @@ void relation_block(Cur& c, Names& name, Object& o) {
             const std::uint64_t v = relation_value(c, r.links);
             if (v != kNoObject) r.objects.push_back(std::uint32_t(v));
         };
-        try {
-        if (chunk->array()) {  // count, an index into the list (< count; not interpreted), elements
-            const std::uint64_t n = c.compact();
-            if (n > c.v.size) bad("relation count exceeds the container", c.base + c.k);
-            if (n && c.compact() >= n) bad("relation list index outside the list", c.base + c.k);
-            for (std::uint64_t i = 0; i < n; ++i) one();
-        } else {
-            one();
-        }
-        } catch (const DecodeError& e) {
-            char t[64];
-            std::snprintf(t, sizeof t, "attribute type e8 %02x %02x %s", chunk->flags, chunk->code, chunk->array() ? "array" : "single");
-            fail(e.code(), e.message() + " [" + t + "]", e.offset());
-        }
+        in_context(
+            [&] {
+                if (chunk->array()) {  // count, an index into the list (< count; not interpreted), elements
+                    const std::uint64_t n = c.compact();
+                    if (n > c.v.size) bad("relation count exceeds the container", c.base + c.k);
+                    if (n && c.compact() >= n) bad("relation list index outside the list", c.base + c.k);
+                    for (std::uint64_t i = 0; i < n; ++i) one();
+                } else {
+                    one();
+                }
+            },
+            [&] {
+                char t[48];
+                std::snprintf(t, sizeof t, "attribute type e8 %02x %02x %s", chunk->flags, chunk->code, chunk->array() ? "array" : "single");
+                return std::string(t);
+            });
         o.rels.push_back(std::move(r));
     }
     ++c.k;
@@ -251,29 +253,38 @@ Stream container(ByteView v, std::size_t base, bool big, std::shared_ptr<const s
         while (c.peek() != 0xfe) name(c);
     if (osmb || osmn || layout.header_fe) c.expect(0xfe, "container header end");
     const std::uint64_t highest = c.compact();
-    std::string where = "object list";  // the grammar position, named in errors
-    try {
-    while (c.peek() != 0xde) {
-        Object o;
-        where = "object " + std::to_string(s.objects.size() + 1) + " at byte " + std::to_string(c.base + c.k) + " (SPEC v" + std::to_string(s.spec_version) + ")";
-        object(c, layout, name, o, s.objects.empty());
-        if (!s.objects.empty() && o.id <= s.objects.back().id) bad("object ids do not increase", o.offset);
-        if (o.id > highest) bad("object id above the container's highest id", o.offset);
-        s.objects.push_back(std::move(o));
-    }
-    if (s.objects.empty()) bad("SPEC container without objects", base);
-    ++c.k;
-    for (std::size_t i = 0; i < s.objects.size(); ++i) {
-        s.objects[i].relation_offset = c.base + c.k;
-        where = "relation block of object " + std::to_string(i + 1) + " at byte " + std::to_string(c.base + c.k) + " (SPEC v" + std::to_string(s.spec_version) + ")";
-        relation_block(c, name, s.objects[i]);
-    }
-    where = "property tables";
-    property_tables(c, name);
-    if (v.size - c.k >= 8) bad("bytes after the SPEC container", c.base + c.k);  // < 8: padding
-    } catch (const DecodeError& e) {
-        fail(e.code(), e.message() + " [" + where + "]", e.offset());
-    }
+    // The grammar position, for errors: phase, object number (1-based), byte where it starts.
+    const char* phase = "object";
+    std::size_t index = 1, at = c.base + c.k;
+    in_context(
+        [&] {
+            while (c.peek() != 0xde) {
+                Object o;
+                index = s.objects.size() + 1;
+                at = c.base + c.k;
+                object(c, layout, name, o, s.objects.empty());
+                if (!s.objects.empty() && o.id <= s.objects.back().id) bad("object ids do not increase", o.offset);
+                if (o.id > highest) bad("object id above the container's highest id", o.offset);
+                s.objects.push_back(std::move(o));
+            }
+            if (s.objects.empty()) bad("SPEC container without objects", base);
+            ++c.k;
+            phase = "relation block of object";
+            for (std::size_t i = 0; i < s.objects.size(); ++i) {
+                index = i + 1;
+                at = s.objects[i].relation_offset = c.base + c.k;
+                relation_block(c, name, s.objects[i]);
+            }
+            phase = "property tables";
+            at = c.base + c.k;
+            property_tables(c, name);
+            if (v.size - c.k >= 8) bad("bytes after the SPEC container", c.base + c.k);  // < 8: padding
+        },
+        [&] {
+            std::string w = phase;
+            if (*phase != 'p') w += " " + std::to_string(index);
+            return w + " at byte " + std::to_string(at) + " (SPEC v" + std::to_string(s.spec_version) + ")";
+        });
     // the empty name gets the last number
     const std::uint32_t empty = std::uint32_t(s.names.size());
     s.names.emplace_back();

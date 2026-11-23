@@ -14,6 +14,17 @@ namespace cadcore::formats::catia {
 
 [[noreturn]] inline void bad(const std::string& what, std::size_t at) { fail(ErrorCode::Malformed, "CATIA object stream: " + what, at); }
 
+// Runs `f`; a DecodeError from it is rethrown with "[<context()>]" appended (context() is only
+// called on error, so it may format freely).
+template <class F, class Context>
+decltype(auto) in_context(F&& f, Context&& context) {
+    try {
+        return f();
+    } catch (const DecodeError& e) {
+        fail(e.code(), e.message() + " [" + context() + "]", e.offset());
+    }
+}
+
 // Cursor over one record body; `base` maps positions back to file offsets for messages.
 struct Cur {
     ByteView v;
@@ -30,18 +41,14 @@ struct Cur {
     std::uint8_t u8() { const std::uint8_t x = peek(); ++k; return x; }
     std::uint32_t u32() {
         if (k + 4 > v.size) bad("record ends early", base + k);
-        const std::uint8_t* p = v.data + k;
         k += 4;
-        return big ? std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3]
-                   : std::uint32_t(p[3]) << 24 | std::uint32_t(p[2]) << 16 | std::uint32_t(p[1]) << 8 | p[0];
+        return load_u32(v.data + k - 4, big);
     }
     // A u32 that is little-endian whatever the writer's platform (the object id after ea).
     std::uint32_t le32() {
-        const bool b = big;
-        big = false;
-        const std::uint32_t x = u32();
-        big = b;
-        return x;
+        if (k + 4 > v.size) bad("record ends early", base + k);
+        k += 4;
+        return load_u32(v.data + k - 4, false);
     }
     double f64() {
         if (k + 8 > v.size) bad("record ends early", base + k);

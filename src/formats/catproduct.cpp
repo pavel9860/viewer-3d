@@ -125,8 +125,8 @@ std::uint32_t document_node(const Uuid& uuid, const std::string& instance, Conte
     try {
         node = decode_product(v, path, ctx);
     } catch (const DecodeError& e) {
-        if (std::string(e.what()).rfind(path, 0) == 0) throw;
-        fail(e.code(), path + ": " + e.what(), e.offset());
+        if (e.message().rfind(path, 0) == 0) throw;
+        fail(e.code(), path + ": " + e.message(), e.offset());
     }
     ctx.active.erase(uuid);
     ctx.node_of.emplace(uuid, node);
@@ -437,7 +437,7 @@ Scene decode(ByteView d, const DecodeOptions& options) {
             try {
                 part->scene = catpart().decode(ByteView(bytes->data(), bytes->size()), options);
             } catch (const DecodeError& e) {
-                fail(e.code(), part->path + ": " + e.what(), e.offset());
+                fail(e.code(), part->path + ": " + e.message(), e.offset());
             }
         });
     run_all(tasks, options.threads);
