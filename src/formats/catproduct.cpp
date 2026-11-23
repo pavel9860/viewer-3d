@@ -318,6 +318,8 @@ std::uint32_t decode_product(ByteView data, const std::string& label, Context& c
             }
         } else if (tok.size() == 1 && o.startup.has_blob) {
             child_node = document_node(catia::link_target(o.startup.blob, o.offset), name, ctx);
+        } else if (const auto u = tok.size() == 1 ? bag_link(s, o) : std::nullopt) {
+            child_node = document_node(*u, name, ctx);  // the instance's bag carries the document link
         } else {
             bad(form(), o.offset);
         }
@@ -333,6 +335,7 @@ std::uint32_t decode_product(ByteView data, const std::string& label, Context& c
                 const Object* bag = s.by_id(b);
                 if (!bag) bad("instance '" + name + "' lists missing bag object " + std::to_string(b), o.offset);
                 if (const catia::Chunk* pos = s.find(*bag, "_Position")) {
+                    if (pos->value.kind == catia::Value::Kind::Empty) continue;  // declared, never set: no placement
                     if (pos->value.kind != catia::Value::Kind::Doubles) bad("_Position is not a number array", bag->offset);
                     t = placement(pos->value.d, bag->offset);
                     ++placed;

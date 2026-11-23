@@ -196,16 +196,15 @@ Value chunk_value(Cur& c, std::uint8_t flags, std::uint8_t code, Name&& name, bo
 }
 
 // Parameter (literal) block, present when the e9 descriptor's extra byte has bit 0x01:
-//   88 <n> <n> <n> <n> <m> [<name> <name> when m == 0xfffffffe] <count> <number>*count <n>
-// (seen on user properties and knowledgeware parameters; the fields are not interpreted).
+//   88 <n> <n> <n> <n> <m> [<name>*k when m is a negative 32-bit -k] <count> <number>*count <n>
+// (k = 2 on user properties and knowledgeware parameters, 3 on electrical parameters; the fields
+// are not interpreted).
 template <class Name>
 void literal_block(Cur& c, Name&& name) {
     c.expect(0x88, "parameter block marker");
     for (int i = 0; i < 4; ++i) c.compact();
-    if (c.compact() == 0xfffffffeu) {
-        name(c);
-        name(c);
-    }
+    if (const std::uint64_t m = c.compact(); m >= 0xfffffff0u && m <= 0xffffffffu)
+        for (std::uint64_t k = 0x100000000u - m; k > 0; --k) name(c);
     const std::uint64_t n = c.compact();
     if (n > c.v.size) bad("parameter block count exceeds the record", c.base + c.k);
     for (std::uint64_t i = 0; i < n; ++i) c.number();

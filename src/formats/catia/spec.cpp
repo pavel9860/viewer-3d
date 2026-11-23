@@ -352,8 +352,9 @@ SpecStreams parse_spec_streams(ByteView file) {
                 } catch (const DecodeError& first) {
                     try {
                         out.streams.push_back(container(body, it.offset, data->big, false, data->bytes));
-                    } catch (const DecodeError&) {
-                        throw first;
+                    } catch (const DecodeError& second) {
+                        fail(first.code(), first.message() + "; without chunk ends: " + second.message() + " (at byte " + std::to_string(second.offset()) + ")",
+                             first.offset());
                     }
                 }
             } catch (const DecodeError& e) {

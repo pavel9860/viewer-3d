@@ -77,13 +77,14 @@ Store read_store(ByteView file, std::size_t origin) {
         bad("missing V5_CFVn header", origin);
     const std::uint8_t* h = file.data + origin;
     if (h[6] < '0' || h[6] > '9') bad("bad version digit", origin + 6);
-    // Bytes 16..23: ff x 8, or (offset, length) of the catalog's "CATIA_V5 CB0001" block when the
-    // writer placed it apart from the catalog (seen in R11 files). That block is not needed to
-    // locate streams; it is checked, not read.
+    // Bytes 16..23: ff x 8, or (offset, length) of the previous catalog block ("CATIA_V5 CB0001",
+    // as the current one at bytes 8..15: catalogs are written alternately). It is not needed to
+    // locate streams and is not read; it may lie at or past the end of a file that shrank since.
     if (!std::all_of(h + 16, h + 24, [](std::uint8_t b) { return b == 0xff; })) {
         const std::uint32_t boff = be32(h + 16), blen = be32(h + 20);
         constexpr char kBlock[] = "CATIA_V5 CB0001";
-        if (blen < sizeof kBlock || origin + std::uint64_t(boff) + blen > file.size || std::memcmp(h + boff, kBlock, sizeof kBlock) != 0)
+        const bool past_end = origin + std::uint64_t(boff) >= file.size;
+        if (!past_end && (blen < sizeof kBlock || origin + std::uint64_t(boff) + blen > file.size || std::memcmp(h + boff, kBlock, sizeof kBlock) != 0))
             bad("header bytes 16..23 are neither ff padding nor a catalog block", origin + 16);
     }
     Store st;
