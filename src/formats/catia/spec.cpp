@@ -157,7 +157,9 @@ void relation_block(Cur& c, Names& name, Object& o) {
         o.cls = name(c);
         c.expect(0xfe, "class definition end");
     }
-    while (c.peek() != 0xfe) {
+    // Tokens until fe, or until a byte that cannot start a token (< 80: an attribute name, the
+    // relation list following without the fe).
+    while (c.peek() != 0xfe && c.peek() >= 0x80) {
         HeaderToken t;
         if (c.peek() == 0xe5) {
             t.is_blob = true;
@@ -171,7 +173,7 @@ void relation_block(Cur& c, Names& name, Object& o) {
         }
         o.header.push_back(t);
     }
-    ++c.k;
+    if (c.peek() == 0xfe) ++c.k;
     // An object without chunks has no attributes to relate: its relation list is empty, written as
     // fe or left out (the next block's head is never fe). Left out after headers of a link and three
     // numbers (about 200 blocks, CAA electrical and DMU samples), written otherwise.
