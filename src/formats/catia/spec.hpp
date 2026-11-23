@@ -20,7 +20,10 @@
 //   (fe f6 <GUID 16> | 80 <5 bytes>) <kind u8> [u8 from version 19] [<compact> when kind is odd]
 //   ea <u32 id> [<compact n> <name>*n from version 10]
 //   startup: <compact> | e5 <blob> <compact> | fd <compact>
-//   chunk* fe   (the chunk encoding of OSM records with inline names; chunks close with fe from
+//   chunk* fe   (chunk: <attribute> [<name>, a second name some writers put before the head]
+//               then as in OSM records; some writers leave out the chunk-closing fe: the layout is
+//               chosen per container, the one that parses it completely)
+//               (the chunk encoding of OSM records with inline names; chunks close with fe from
 //               version 10; the first object (the catalog manager, in all 79 containers of
 //               versions 10+) has no closing fe: its list ends where the next object or de begins)
 //   flag 02: a parameter value follows: <compact> <type> [<compact> from version 13]

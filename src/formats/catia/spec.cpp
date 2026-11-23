@@ -45,8 +45,10 @@ struct Layout {
     bool chunk_end;     // fe closing each chunk (version 10+)
     bool header_fe;     // fe in the container header (version 19+)
     bool param_count;   // a third compact in parameter values (version 13+)
-    explicit Layout(int v)
-        : stamps(v <= 12 ? 1 : 2), kind2(v >= 19), startup_names(v >= 10), chunk_end(v >= 10), header_fe(v >= 19), param_count(v >= 13) {}
+    // `chunk_ends`: whether chunks close with fe (from version 10 in most writers; some CAA-saved
+    // files of versions 11..26 leave it out: chosen per container, see parse_spec_streams).
+    Layout(int v, bool chunk_ends)
+        : stamps(v <= 12 ? 1 : 2), kind2(v >= 19), startup_names(v >= 10), chunk_end(v >= 10 && chunk_ends), header_fe(v >= 19), param_count(v >= 13) {}
 };
 
 // `first`: the container's first object (its catalog manager), whose chunk list has no closing fe
@@ -96,6 +98,9 @@ void object(Cur& c, const Layout& L, Names& name, Object& o, bool first) {
         if (first && L.chunk_end && !o.chunks.empty() && (c.peek() == 0x00 || c.peek() == 0x02 || c.peek() == 0xde)) break;  // next object / relations
         Chunk ch;
         ch.attr = name(c);
+        // A second name before the head (the attribute's name again, or a stale string) in the
+        // writers without chunk ends; a byte below 80 cannot start the head.
+        if (c.peek() < 0x80) ch.attr = name(c);
         ch.head = c.compact();
         const std::uint8_t t = c.u8();
         if (t != 0xe8 && t != 0xe9) bad("invalid type descriptor", c.base + c.k - 1);
@@ -244,7 +249,7 @@ void property_tables(Cur& c, Names& name) {
 }
 
 // One SPEC container (the bytes after its item header).
-Stream container(ByteView v, std::size_t base, bool big, std::shared_ptr<const std::vector<std::uint8_t>> storage) {
+Stream container(ByteView v, std::size_t base, bool big, bool chunk_ends, std::shared_ptr<const std::vector<std::uint8_t>> storage) {
     Stream s;
     s.offset = base;
     s.storage = std::move(storage);
@@ -259,7 +264,7 @@ Stream container(ByteView v, std::size_t base, bool big, std::shared_ptr<const s
     if (version == 0 || version > 1000) bad("invalid SPEC version", base + 4);
     s.spec_version = int(version);
     c.compact();
-    const Layout layout(s.spec_version);
+    const Layout layout(s.spec_version, chunk_ends);
     if (osmb)
         while (c.peek() != 0xfe) name(c);
     // OSMN: an optional document link table before fe: 82 <n> (<link blob> <link blob>)*n
@@ -340,7 +345,17 @@ SpecStreams parse_spec_streams(ByteView file) {
                                                  std::memcmp(body.data, "OSMN", 4) == 0);
             if ((it.tag != 4 && it.tag != 5) || !spec) continue;
             try {
-                out.streams.push_back(container(body, it.offset, data->big, data->bytes));
+                // Writers close chunks with fe or not; the container must parse completely in one of
+                // the two layouts (the first error is the one reported).
+                try {
+                    out.streams.push_back(container(body, it.offset, data->big, true, data->bytes));
+                } catch (const DecodeError& first) {
+                    try {
+                        out.streams.push_back(container(body, it.offset, data->big, false, data->bytes));
+                    } catch (const DecodeError&) {
+                        throw first;
+                    }
+                }
             } catch (const DecodeError& e) {
                 out.failed.push_back({it.offset, body.size, body.find("_PartNumber", 0, body.size) != ByteView::npos, e.code(), e.message(), e.offset()});
             }

@@ -29,6 +29,9 @@ std::vector<Chunk> attribute_record(ByteView body, std::size_t base) {
     while (!c.end() && c.peek() != 0xfe) {
         Chunk ch;
         ch.attr = pool_name(c);
+        // Some writers (CAA electrical, xPDM samples) put a second name before the head: the
+        // attribute's own name again, or a stale string; a byte below 80 cannot start the head.
+        if (c.peek() < 0x80) ch.attr = pool_name(c);
         ch.head = c.compact();
         const std::uint8_t t = c.u8();
         if (t != 0xe8 && t != 0xe9) bad("invalid type descriptor", base + c.k - 1);
@@ -38,7 +41,7 @@ std::vector<Chunk> attribute_record(ByteView body, std::size_t base) {
         ch.qualifier = pool_name(c);  // usually pool entry 3 (the empty name)
         ch.value = chunk_value(c, ch.flags, ch.code, pool_name, true);
         if (ch.extra & 0x01) literal_block(c, pool_name);
-        c.expect(0xfe, "chunk end");
+        if (c.peek() == 0xfe) ++c.k;  // chunk end; those writers leave it out
         out.push_back(std::move(ch));
     }
     if (!c.end()) {
