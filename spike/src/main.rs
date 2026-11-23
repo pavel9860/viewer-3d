@@ -4,6 +4,9 @@
 //!   spike step LIST [opts]    CATIA STEP edge check (see step.rs)
 //!   spike pred                exact predicate benchmark
 //!   spike bool                boolean spike
+//!   spike real DIR            real CATIA data workloads (DIR from tools/export_parts.py)
+//!   spike bench               architecture benchmarks (determinism, transfer, recompute, hashing, naming, assembly)
+mod bench;
 mod boolean;
 mod exact;
 mod geom;
@@ -12,6 +15,7 @@ mod ssi;
 mod ssi_cases;
 mod nurbs;
 mod p21;
+mod real;
 mod step;
 
 use std::time::Instant;
@@ -25,6 +29,8 @@ fn main() {
         Some("step") => step::run(&args[2..]),
         Some("pred") => exact::bench(),
         Some("bool") => boolean::run(),
+        Some("real") => { real::run(&args[2]); 0 }
+        Some("bench") => { bench::determinism(); bench::transfer(); bench::incremental(); bench::hashing(); bench::naming(); bench::assembly(); 0 }
         _ => { eprintln!("usage: spike ssi | stress [N] | step LIST [--full] [--pair KIND] [--file NAME]"); 2 }
     };
     std::process::exit(code.min(1) as i32);
