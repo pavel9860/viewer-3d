@@ -7,7 +7,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
-pub const WORKERS: usize = 2;
+pub const WORKERS: usize = 4;
 pub fn as_bytes<T>(v: &[T]) -> &[u8] { unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) } }
 
 /// run `f(i)` for i in 0..n on `t` threads (work stealing by atomic counter)

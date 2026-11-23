@@ -1,0 +1,95 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Kernel WASM tests</title>
+<style>body{font:13px monospace;background:#111;color:#ddd;padding:16px}pre{white-space:pre-wrap}</style>
+<pre id="o"></pre>
+<script type="module">
+// Browser side of the kernel tests: thread scaling, bit-exact determinism vs native (`spike bench` / `spike real`),
+// memory limits, worker transfer. The log is also POSTed to /result for headless runs.
+const WORKERS = 4, MB = 1 << 20;
+const CTR = 16 * MB, RES = 16 * MB + 64, PART = 17 * MB, DATA = 32 * MB;
+const NT = 4000, PN = 64, SUM_N = 4_000_000, SUM_CH = 65536;
+const lines = [], out = document.getElementById('o');
+const log = s => { lines.push(s); out.textContent += s + '\n'; };
+const hex = b => BigInt.asUintN(64, b).toString(16).padStart(16, '0');
+
+const workerSrc = `
+  let X, ctr;
+  onmessage = async ({ data: m }) => {
+    if (m.init) { X = (await WebAssembly.instantiate(m.mod, { env: { memory: m.mem } })).exports; X.__stack_pointer.value = m.sp; ctr = new Int32Array(m.mem.buffer, m.CTR, 1); postMessage(0); return; }
+    if (m.echo !== undefined) { postMessage(m.echo, m.transfer ? [m.echo] : []); return; }
+    const buf = m.mem.buffer, take = n => { const i = Atomics.add(ctr, 0, 1); return i < n ? i : -1; };
+    if (m.task === 'patch') { const r = new BigUint64Array(buf, m.RES, m.NT); for (let i; (i = take(m.NT)) >= 0;) r[i] = X.patch_work(BigInt(i), m.PN); }
+    if (m.task === 'sum') { const r = new Float64Array(buf, m.PART, m.nc); for (let c; (c = take(m.nc)) >= 0;) r[c] = X.sum(m.DATA + c * m.CH * 8, Math.min(m.CH, m.N - c * m.CH)); }
+    if (m.task === 'mesh') {
+      const r = new BigUint64Array(buf, m.RES2, m.n), idx = new BigUint64Array(buf, m.IDX, 2 * m.n), ord = new Int32Array(buf, m.ORD, m.n);
+      for (let k; (k = take(m.n)) >= 0;) { const i = ord[k], off = Number(idx[2 * i]), len = Number(idx[2 * i + 1]); r[i] = X.mesh_work(m.PARTS + off * 4, len, m.scr, X.mesh_scratch_len(len / 3)); }
+    }
+    postMessage(0);
+  };`;
+
+try {
+  log(`browser: ${navigator.userAgent}\ncrossOriginIsolated=${self.crossOriginIsolated} hardwareConcurrency=${navigator.hardwareConcurrency}`);
+  const mod = await WebAssembly.compile(await (await fetch('k.wasm')).arrayBuffer());
+  const mem = new WebAssembly.Memory({ initial: 1024, maximum: 65536, shared: true });
+  const X = (await WebAssembly.instantiate(mod, { env: { memory: mem } })).exports;
+  const ctr = new Int32Array(mem.buffer, CTR, 1);
+  const url = URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' }));
+  const W = await Promise.all([...Array(WORKERS).keys()].map(i => new Promise(r => { const w = new Worker(url); w.onmessage = () => r(w); w.postMessage({ init: 1, mod, mem, sp: 8 * MB + (i + 1) * MB, CTR }); })));
+  const runOn = (n, msg) => { Atomics.store(ctr, 0, 0); return Promise.all(W.slice(0, n).map((w, i) => new Promise(r => { w.onmessage = r; w.postMessage(typeof msg === 'function' ? msg(i) : msg); }))); };
+  const scale = async (title, msg, hash) => {
+    log(`\n== ${title} ==`);
+    let base = 0;
+    for (let t = 1; t <= WORKERS; t++) {
+      const t0 = performance.now(); await runOn(t, msg); const e = performance.now() - t0;
+      if (t === 1) base = e;
+      log(`  workers=${t}  ${e.toFixed(1)} ms  speedup ${(base / e).toFixed(2)}x  results hash ${hash()}`);
+    }
+  };
+
+  await scale('thread scaling (patch workload, native ref 6ef0b63c90198504)', { task: 'patch', mem, RES, NT, PN }, () => hex(X.hash(RES, NT * 8)));
+
+  log('\n== determinism (native refs: sum 416be73ad53ad11b, fill 6f8b80adb3786a0e, orient2d e5dd8374933b18b5, sin f4676d8dc069f807) ==');
+  X.fill(DATA, SUM_N, 42n);
+  const nc = Math.ceil(SUM_N / SUM_CH), sums = [];
+  for (const t of [1, WORKERS]) {
+    await runOn(t, { task: 'sum', mem, PART, DATA, N: SUM_N, CH: SUM_CH, nc });
+    const part = new Float64Array(mem.buffer, PART, nc);
+    let s = 0; for (let c = 0; c < nc; c++) s += part[c];
+    sums.push(hex(new BigUint64Array(new Float64Array([s]).buffer)[0]));
+  }
+  log(`  chunked sum (1/${WORKERS} workers) ${sums.join(' ')}`);
+  log(`  fill ${hex(X.hash(DATA, SUM_N * 8))} | orient2d ${hex(X.orient_hash(7n, 1_000_000))} | own sin ${hex(X.sin_hash(9n, 1_000_000))}`);
+
+  const bin = new Uint8Array(await (await fetch('parts.bin')).arrayBuffer());
+  const idxb = new Uint8Array(await (await fetch('parts.idx')).arrayBuffer());
+  const n = idxb.length / 16, SCR = 64 * MB, IDX = 160 * MB, ORD = 161 * MB, RES2 = 162 * MB, PARTS = 192 * MB;
+  if (PARTS + bin.length > mem.buffer.byteLength) mem.grow(Math.ceil((PARTS + bin.length - mem.buffer.byteLength) / 65536));
+  new Uint8Array(mem.buffer, PARTS, bin.length).set(bin);
+  new Uint8Array(mem.buffer, IDX, idxb.length).set(idxb);
+  const idx = new BigUint64Array(mem.buffer, IDX, 2 * n);
+  new Int32Array(mem.buffer, ORD, n).set([...Array(n).keys()].sort((a, b) => Number(idx[2 * b + 1] - idx[2 * a + 1]) || a - b));
+  await scale(`real CATIA parts (${n} parts, native ref 2e5d3785e52d5774)`, i => ({ task: 'mesh', mem, RES2, IDX, ORD, PARTS, n, scr: SCR + i * 16 * MB }), () => hex(X.hash(RES2, n * 8)));
+
+  log('\n== memory ==');
+  let pages = mem.buffer.byteLength / 65536;
+  for (const step of [2048, 64]) { try { for (;;) { mem.grow(step); pages += step; } } catch { } }
+  log(`  shared memory32 grew to ${(pages * 65536 / 2 ** 30).toFixed(2)} GiB | Memory64 validates: ${WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 5, 3, 1, 4, 1]))}`);
+
+  log('\n== transfer to a worker (2.72 MB), round trip ==');
+  for (const mode of ['structured clone', 'transfer', 'shared memory (offset only)']) {
+    let buf = new ArrayBuffer(2_720_000);
+    const t0 = performance.now();
+    for (let i = 0; i < 50; i++) {
+      buf = await new Promise(res => {
+        W[0].onmessage = e => res(mode === 'transfer' ? e.data : buf);
+        if (mode === 'transfer') W[0].postMessage({ echo: buf, transfer: true }, [buf]);
+        else W[0].postMessage({ echo: mode === 'structured clone' ? buf : DATA });
+      });
+    }
+    log(`  ${mode.padEnd(28)} ${((performance.now() - t0) / 50).toFixed(3)} ms`);
+  }
+  log('\nDONE');
+} catch (e) { log(`ERROR: ${e}\n${e.stack || ''}`); }
+fetch('/result', { method: 'POST', body: lines.join('\n') }).catch(() => {});
+</script>
