@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "formats/catia/osm.hpp"
 
 #include "formats/catia/cursor.hpp"
@@ -272,11 +273,9 @@ std::vector<Relation> relations(const Stream& s, const Object& o) {
             if (ch.attr == r.attr) chunk = &ch;
         if (!chunk) bad("relation for an attribute the object does not declare", o.offset);
         if (chunk->array()) {
-            counted(c, [&] {
+            counted(c, [&] {  // elements: <object id> <tag>, both compact numbers (tag 0 | u32 | 2-byte form)
                 r.objects.push_back(std::uint32_t(c.compact()));
-                const std::uint8_t t = c.u8();
-                if (t == 0x80) c.u32();
-                else if (t != 0x81) bad("invalid relation tag", o.offset);
+                c.compact();
             });
         } else {
             r.objects.push_back(std::uint32_t(c.compact()));
@@ -343,6 +342,41 @@ std::vector<HeaderToken> relation_header(const Object& o) {
         HeaderToken t;
         token(t);
         out.push_back(t);
+    }
+    return out;
+}
+
+std::string value_text(const Stream& s, const Value& v) {
+    auto num = [](double d) {
+        char b[32];
+        std::snprintf(b, sizeof b, "%.17g", d);
+        return std::string(b);
+    };
+    auto hex = [](ByteView b) {
+        std::string h;
+        for (std::size_t k = 0; k < b.size; ++k) {
+            char t[4];
+            std::snprintf(t, sizeof t, "%02x", b[k]);
+            h += t;
+        }
+        return h;
+    };
+    std::string out;
+    auto add = [&](const std::string& x) { out += (out.empty() ? "" : " ") + x; };
+    using K = Value::Kind;
+    switch (v.kind) {
+        case K::Empty: break;
+        case K::Name: add("'" + s.name(std::uint32_t(v.i)) + "'"); break;
+        case K::Names: for (auto n : v.names) add("'" + s.name(n) + "'"); break;
+        case K::Int: add(std::to_string(v.i)); break;
+        case K::Ints: for (auto n : v.ints) add(std::to_string(n)); break;
+        case K::Double:
+        case K::Doubles: for (double d : v.d) add(num(d)); break;
+        case K::Link:
+        case K::Links:
+            for (const auto& l : v.links) add("{a " + std::to_string(l.a) + (l.has_blob ? " blob " + hex(l.blob) : " n " + std::to_string(l.number)) + "}");
+            break;
+        case K::Octets: add(hex(v.octets)); break;
     }
     return out;
 }

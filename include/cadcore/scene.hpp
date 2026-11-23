@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cadcore {
@@ -55,6 +56,9 @@ struct Node {
     std::vector<std::uint32_t> meshes;      // indices into Scene::meshes
     std::vector<std::uint32_t> polylines;   // indices into Scene::polylines
     std::vector<std::uint32_t> children;    // indices into Scene::nodes
+    // Named non-geometric data of the node as decoded (e.g. a CATIA product's type and
+    // application attributes such as a piping specification), in file order.
+    std::vector<std::pair<std::string, std::string>> properties;
 };
 
 struct Scene {

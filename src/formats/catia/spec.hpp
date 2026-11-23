@@ -1,12 +1,7 @@
 // CATIA V5 object containers with inline names ("SPEC", "OSMN", "OSMB": R5..R17), the forms
 // that preceded the framed OSM streams.
 //
-// They sit in the store's "Data" stream, a sequence of sections
-//   u32 id, u32 length8                    length in 8-byte units, this header included
-//   body: u16 1, u16 kind, u32 index       then items  u16 tag, u16 flags, u32 length8, data
-// Items: tag 1 (8 bytes of container data), 2 (the container's class names), 3 (its GUID),
-// 4 / 5 payloads: object containers in this grammar ("SPEC", R11..R16; "OSMN", "OSMB", R16..R17;
-// read here), framed OSM streams ("OSMX", formats/catia/osm.hpp), user ids.
+// They are payload items (tag 4 or 5) of the store's "Data" stream (formats/catia/data.hpp).
 //
 // A SPEC container, with names written inline the first time (u8 n then n-1 bytes, or 00 u32 n
 // then n bytes; an empty name is not numbered) and referenced afterwards by number as in OSM:
@@ -16,6 +11,9 @@
 //   object*                                   until de
 //   de, one relation block per object
 //   property tables (one per object, in some files one more), fe, then padding to the section end
+// Byte order: the u32/f64 fields inside containers follow the writer's
+// platform (big-endian in files from big-endian UNIX systems, 8 files of the corpus); the object id
+// after ea is little-endian in both.
 // Object (version-dependent fields: struct Layout in spec.cpp, tabulated over containers of
 // versions 5..26 in ~2,200 files):
 //   {00 | 02} <name> <handle> <stamp> [<stamp> from version 13]
@@ -32,7 +30,7 @@
 //   header token* fe (compact | e5 <blob> | fd <compact>)
 //   (<attribute> (<count> <index < count> <value>* | <value>))* fe
 //   value: compact | e5 <blob> <compact> | 7f <a> <n> <id>*n <index>*(n+1)  (path, not followed)
-// Property table: <count> (<name> <type> <value>)*: type 2, 3: compact; 0, 14: none;
+// Property table: <count> (<name> <type> <value>)*: type 2, 3, 5: compact; 0, 14: none;
 //   13: byte e7+n (n = 1..8; 485 values), a form byte, n bytes.
 #pragma once
 

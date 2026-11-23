@@ -42,6 +42,7 @@ add_library(cadcore STATIC
   src/formats/cgr.cpp
   src/formats/catia/osm.cpp
   src/formats/catia/spec.cpp
+  src/formats/catia/data.cpp
   src/formats/catia/document.cpp
   src/formats/catia/tessellation.cpp
   src/formats/catia/store.cpp

@@ -115,4 +115,8 @@ std::vector<Relation> relations(const Stream& s, const Object& o);
 
 std::vector<HeaderToken> relation_header(const Object& o);
 
+// A chunk value as text: names quoted, numbers in shortest round-trip form, links as
+// {a <n> blob <hex> | n <number>}, octets as hex; "" for an empty value.
+std::string value_text(const Stream& s, const Value& v);
+
 }  // namespace cadcore::formats::catia

@@ -18,6 +18,9 @@ namespace cadcore::formats::catia {
 struct Cur {
     ByteView v;
     std::size_t k = 0, base = 0;
+    // Byte order of the writer's platform for u32 / f64 fields (compact 80 form, blob lengths,
+    // long names, numbers): little-endian except in files written on big-endian UNIX systems.
+    bool big = false;
 
     bool end() const { return k >= v.size; }
     std::uint8_t peek(std::size_t ahead = 0) const {
@@ -27,16 +30,26 @@ struct Cur {
     std::uint8_t u8() { const std::uint8_t x = peek(); ++k; return x; }
     std::uint32_t u32() {
         if (k + 4 > v.size) bad("record ends early", base + k);
-        std::uint32_t x;
-        std::memcpy(&x, v.data + k, 4);
+        const std::uint8_t* p = v.data + k;
         k += 4;
+        return big ? std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3]
+                   : std::uint32_t(p[3]) << 24 | std::uint32_t(p[2]) << 16 | std::uint32_t(p[1]) << 8 | p[0];
+    }
+    // A u32 that is little-endian whatever the writer's platform (the object id after ea).
+    std::uint32_t le32() {
+        const bool b = big;
+        big = false;
+        const std::uint32_t x = u32();
+        big = b;
         return x;
     }
     double f64() {
         if (k + 8 > v.size) bad("record ends early", base + k);
-        double x;
-        std::memcpy(&x, v.data + k, 8);
+        std::uint64_t u = 0;
+        for (int i = 0; i < 8; ++i) u |= std::uint64_t(v.data[k + std::size_t(i)]) << (8 * (big ? 7 - i : i));
         k += 8;
+        double x;
+        std::memcpy(&x, &u, 8);
         return x;
     }
     void expect(std::uint8_t b, const char* what) {

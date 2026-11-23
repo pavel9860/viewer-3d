@@ -657,6 +657,7 @@ static int cmd_tree(int argc, char** argv) {
             if (!node.polylines.empty()) std::printf("  polylines %zu", node.polylines.size());
             if (node.transform != kIdentity) std::printf("  t=(%g %g %g)", node.transform[12], node.transform[13], node.transform[14]);
             std::printf("\n");
+            for (const auto& [k, v] : node.properties) std::printf("%*s  %s = %s\n", depth * 2, "", k.c_str(), v.c_str());
             if (on_path[n]) { std::printf("%*s(cycle)\n", depth * 2 + 2, ""); return; }
             on_path[n] = true;
             for (auto c : node.children) self(self, c, depth + 1);
@@ -712,31 +713,9 @@ static int cmd_objects(int argc, char** argv) {
                 if (!filter.empty() && cls.find(filter) == std::string::npos) continue;
                 std::printf("  #%u %s '%s' flag %u @%zu\n", o.id, cls.c_str(), st.name(o.name).c_str(), o.flag, o.offset);
                 for (const auto& c : o.chunks) {
-                    using K = formats::catia::Value::Kind;
-                    std::string v;
-                    switch (c.value.kind) {
-                        case K::Name: v = "'" + st.name(std::uint32_t(c.value.i)) + "'"; break;
-                        case K::Int: v = std::to_string(c.value.i); break;
-                        case K::Double: v = std::to_string(c.value.d.at(0)); break;
-                        case K::Doubles: for (double d : c.value.d) v += std::to_string(d) + " "; break;
-                        case K::Names: for (auto n : c.value.names) v += "'" + st.name(n) + "' "; break;
-                        case K::Ints: for (auto n : c.value.ints) v += std::to_string(n) + " "; break;
-                        case K::Link: case K::Links:
-                            for (const auto& l : c.value.links) {
-                                v += "{a " + std::to_string(l.a);
-                                if (l.has_blob) {
-                                    v += " blob ";
-                                    for (std::size_t k = 0; k < l.blob.size && k < 48; ++k) { char b[4]; std::snprintf(b, sizeof b, "%02x", l.blob[k]); v += b; }
-                                    if (l.blob.size > 48) v += "... (" + std::to_string(l.blob.size) + " bytes)";
-                                } else {
-                                    v += " n " + std::to_string(l.number);
-                                }
-                                v += "} ";
-                            }
-                            break;
-                        case K::Empty: v = "-"; break;
-                        case K::Octets: v = std::to_string(c.value.octets.size) + " bytes"; break;
-                    }
+                    std::string v = formats::catia::value_text(st, c.value);
+                    if (v.empty()) v = "-";
+                    if (v.size() > 200) v = v.substr(0, 200) + "... (" + std::to_string(v.size()) + " chars)";
                     std::printf("      %s = %s\n", st.name(c.attr).c_str(), v.c_str());
                 }
                 std::string h;

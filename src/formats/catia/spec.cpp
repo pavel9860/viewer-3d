@@ -5,18 +5,13 @@
 #include <memory>
 
 #include "formats/catia/cursor.hpp"
-#include "formats/catia/store.hpp"
+#include "formats/catia/data.hpp"
 
 namespace cadcore::formats::catia {
 namespace {
 
 constexpr std::uint32_t kEmpty = std::numeric_limits<std::uint32_t>::max();  // the empty name, numbered last
 
-std::uint32_t le32(const std::uint8_t* p) {
-    std::uint32_t x;
-    std::memcpy(&x, p, 4);
-    return x;
-}
 
 // Names written inline on first use and numbered in order; references as in OSM pools.
 struct Names {
@@ -79,7 +74,7 @@ void object(Cur& c, const Layout& L, Names& name, Object& o, bool first) {
     if (L.kind2) o.kind[1] = c.u8();
     if (o.kind[0] & 1) c.compact();
     c.expect(0xea, "object id marker");
-    o.id = c.u32();
+    o.id = c.le32();  // little-endian in big-endian files too (all 8 such files of the corpus)
     if (L.startup_names) {
         const std::uint64_t n = c.compact();
         if (n > c.v.size) bad("container name count exceeds the container", c.base + c.k);
@@ -216,7 +211,8 @@ void property_tables(Cur& c, Names& name) {
             name(c);
             switch (c.compact()) {
                 case 2:
-                case 3: c.compact(); break;
+                case 3:
+                case 5: c.compact(); break;  // 5: AsmVisuAttr* in Gardena (R12, 37 values; 80 ffffffff = -1)
                 case 0:
                 case 14: break;
                 case 13: {
@@ -235,11 +231,11 @@ void property_tables(Cur& c, Names& name) {
 }
 
 // One SPEC container (the bytes after its item header).
-Stream container(ByteView v, std::size_t base, std::shared_ptr<const std::vector<std::uint8_t>> storage) {
+Stream container(ByteView v, std::size_t base, bool big, std::shared_ptr<const std::vector<std::uint8_t>> storage) {
     Stream s;
     s.offset = base;
     s.storage = std::move(storage);
-    Cur c{v, 4, base};
+    Cur c{v, 4, base, big};
     Names name{s.names};
     // "SPEC" <version> <compact> [fe from version 19]
     // "OSMB" <version> <compact> <name>* fe          "OSMN" <name>* <version> <compact> fe
@@ -305,37 +301,20 @@ Stream container(ByteView v, std::size_t base, std::shared_ptr<const std::vector
 
 SpecStreams parse_spec_streams(ByteView file) {
     SpecStreams out;
-    if (file.size < 8 || std::memcmp(file.data, "V5_CFV", 6) != 0) return out;
-    const Store store = read_store(file);
-    const StreamInfo* info = store.find("Data");
-    if (!info) return out;
-    auto bytes = std::make_shared<const std::vector<std::uint8_t>>(read_stream(file, store, *info));
-    const std::uint8_t* d = bytes->data();
-    const std::size_t n = bytes->size();
-    std::size_t base = 0;  // offsets in messages are positions in the Data stream
-    for (std::size_t a = 0; a < n;) {
-        if (a + 16 > n) bad("Data section header past the stream end", base + a);
-        const std::uint64_t end = a + 8 * std::uint64_t(le32(d + a + 4));
-        if (end <= a + 8 || end > n) bad("Data section length out of range", base + a);
-        if ((le32(d + a + 8) & 0xffff) != 1) bad("Data section without its container header", base + a + 8);
-        for (std::size_t q = a + 16; q < end;) {
-            if (q + 8 > end) bad("Data item header past its section", base + q);
-            const std::uint16_t tag = std::uint16_t(d[q] | d[q + 1] << 8);
-            const std::uint64_t len = 8 * std::uint64_t(le32(d + q + 4));
-            if (len < 8 || q + len > end) bad("Data item length out of range", base + q);
-            const bool spec = std::memcmp(d + q + 8, "SPEC", 4) == 0 || std::memcmp(d + q + 8, "OSMB", 4) == 0 || std::memcmp(d + q + 8, "OSMN", 4) == 0;
-            if ((tag == 4 || tag == 5) && len >= 12 && spec) {
-                const ByteView body(d + q + 8, std::size_t(len - 8));
-                try {
-                    out.streams.push_back(container(body, base + q + 8, bytes));
-                } catch (const DecodeError& e) {
-                    out.failed.push_back({base + q + 8, body.size, body.find("_PartNumber", 0, body.size) != ByteView::npos, e.code(), e.message(), e.offset()});
-                }
+    const auto data = read_data_stream(file);
+    if (!data) return out;
+    for (const DataSection& sec : data->sections)
+        for (const DataItem& it : sec.items) {
+            const ByteView& body = it.body;
+            const bool spec = body.size >= 4 && (std::memcmp(body.data, "SPEC", 4) == 0 || std::memcmp(body.data, "OSMB", 4) == 0 ||
+                                                 std::memcmp(body.data, "OSMN", 4) == 0);
+            if ((it.tag != 4 && it.tag != 5) || !spec) continue;
+            try {
+                out.streams.push_back(container(body, it.offset, data->big, data->bytes));
+            } catch (const DecodeError& e) {
+                out.failed.push_back({it.offset, body.size, body.find("_PartNumber", 0, body.size) != ByteView::npos, e.code(), e.message(), e.offset()});
             }
-            q += std::size_t(len);
         }
-        a = std::size_t(end);
-    }
     return out;
 }
 

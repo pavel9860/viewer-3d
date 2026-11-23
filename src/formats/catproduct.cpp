@@ -23,6 +23,7 @@
 #include "core/parallel.hpp"
 #include "formats/catia/document.hpp"
 #include "formats/catia/osm.hpp"
+#include "formats/catia/data.hpp"
 #include "formats/catia/spec.hpp"
 #include "formats/registry.hpp"
 
@@ -175,13 +176,32 @@ std::vector<Stream> object_streams(ByteView data, std::vector<std::string>& warn
     return std::move(spec.streams);
 }
 
-// SPEC containers name no product classes; a reference's application content shows as
-// attributes outside the product set.
+// Attributes of the product type; others on a SPEC reference are an application's (SPEC
+// containers name no classes).
 bool product_attribute(std::string_view a) {
     static const std::set<std::string_view> k = {"_ViewsList", "_Connectors", "_RepresentedBy", "_Component", "_PartNumber", "_BagRepsList",
                                                  "_PrdVersion", "_PubConnectors", "_AttrForLiterals", "_RefProduct", "_BOMRefLiterals",
-                                                 "_Nomenclature", "_Revision", "_Definition", "_Source", "_DescriptionRef"};
+                                                 "_Nomenclature", "_Revision", "_Definition", "_Source", "_DescriptionRef", "_Disciplines"};
     return k.count(a) != 0;
+}
+
+// Classes of the document's containers other than the product structure (CATProdCont), the
+// store's container of containers (CATCompoundCont) and saved cameras (CameraStartupContainer):
+// application data this reader does not decode (piping, electrical, manikins, materials, ...).
+// Tabulated over the corpus: documents whose references have an application type always hold
+// such a container; those with only a CAA-derived product type (e.g. "Product1") hold none.
+std::string application_containers(ByteView data) {
+    std::set<std::string> classes;
+    if (const auto d = catia::read_data_stream(data))
+        for (const auto& sec : d->sections)
+            if (!sec.cls.empty() && sec.cls != "CATProdCont" && sec.cls != "CATCompoundCont" && sec.cls != "CameraStartupContainer") {
+                std::string c = sec.cls;
+                while (!c.empty() && c.back() == ' ') c.pop_back();
+                classes.insert(c);
+            }
+    std::string out;
+    for (const auto& c : classes) out += (out.empty() ? "" : ", ") + c;
+    return out;
 }
 
 // The document linked by the first object in `o`'s _BagRepsList whose relation header starts with a link blob.
@@ -204,22 +224,26 @@ std::uint32_t decode_product(ByteView data, const std::string& label, Context& c
     const Stream& s = product_stream(streams);
 
     // References.
+    const std::string app_containers = application_containers(data);
     std::map<std::uint32_t, std::uint32_t> ref_node;  // object id -> node
     for (const Object& o : s.objects) {
         const catia::Chunk* pn = s.find(o, "_PartNumber");
         if (!pn) continue;
-        if (s.spec_version) {
-            std::string extra;
-            for (const catia::Chunk& c : o.chunks)
-                if (!product_attribute(s.name(c.attr))) extra += (extra.empty() ? "" : ", ") + s.name(c.attr);
-            if (!extra.empty())
-                scene.warnings.push_back("reference '" + s.name(o.name) + "' has application attributes (" + extra + "); its own content is not decoded");
-        } else if (s.name(o.cls) != "ASMPRODUCT") {
-            const std::string pn_name = pn->value.kind == catia::Value::Kind::Name ? s.name(std::uint32_t(pn->value.i)) : s.name(o.name);
-            scene.warnings.push_back("reference '" + pn_name + "' is a " + s.name(o.cls) + " (an application product class, e.g. a Human Builder manikin or a piping run); its own content is not decoded");
-        }
+        // The reference's type (an application product class such as a piping run, or a type
+        // named after the reference) and its attribute values, kept as node properties.
+        std::vector<std::pair<std::string, std::string>> props;
+        if (!s.spec_version && s.name(o.cls) != "ASMPRODUCT") props.emplace_back("type", s.name(o.cls));
+        bool application = !props.empty();
+        for (const catia::Chunk& c : o.chunks) application = application || (s.spec_version && !product_attribute(s.name(c.attr)));
+        for (const catia::Chunk& c : o.chunks)
+            if (c.value.kind != catia::Value::Kind::Empty && s.name(c.attr) != "_PartNumber") props.emplace_back(s.name(c.attr), catia::value_text(s, c.value));
         std::string name = pn->value.kind == catia::Value::Kind::Name ? s.name(std::uint32_t(pn->value.i)) : s.name(o.name);
-        ref_node.emplace(o.id, add_node(scene, name));
+        if (application && !app_containers.empty())
+            scene.warnings.push_back("reference '" + name + "'" + (props.empty() || props[0].first != "type" ? std::string(" has application attributes") : " is a " + props[0].second) +
+                                     ": its application data (containers " + app_containers + ") is not decoded");
+        const std::uint32_t node = add_node(scene, name);
+        scene.nodes[node].properties = std::move(props);
+        ref_node.emplace(o.id, node);
     }
     // References defined in another document (e.g. schematic/catalog components): a relation
     // header "<blob> <index>" without a parent. Their content is the linked document.
@@ -252,34 +276,37 @@ std::uint32_t decode_product(ByteView data, const std::string& label, Context& c
         scene.nodes[node].children.push_back(doc);
     }
 
-    // Instances. In SPEC containers an instance may lack _InstanceName (version 9): it is then an
-    // object a reference lists in _Component, named by its object name; the header holds the
-    // parent alone and the startup links the instantiated document.
+    // Instances: objects with _InstanceName, and (SPEC containers, where it may be absent) objects
+    // a reference lists in _Component, named then by their object name. Their relation header is
+    //   [startup index] [<document blob> [<link index>] | <reference id>] <parent id>
+    // the last token the parent reference; the child is the linked document, the reference of the
+    // same container, or, without either, the document of the instance's bag or of its startup.
     std::set<std::uint32_t> components;
-    if (s.spec_version)
-        for (const auto& [id, node] : ref_node)
-            for (const auto& rel : catia::relations(s, *s.by_id(id)))
+    for (const auto& [id, node] : ref_node)
+        if (const Object* r = s.by_id(id))
+            for (const auto& rel : catia::relations(s, *r))
                 if (s.name(rel.attr) == "_Component") components.insert(rel.objects.begin(), rel.objects.end());
     std::set<std::uint32_t> used_refs;
     for (const Object& o : s.objects) {
         const catia::Chunk* in = s.find(o, "_InstanceName");
-        const bool startup_instance = !in && components.count(o.id);
-        if (!in && !startup_instance) continue;
+        if (!in && !(components.count(o.id) && !s.find(o, "_PartNumber"))) continue;
         if (std::any_of(linked_refs.begin(), linked_refs.end(), [&](const auto& l) { return l.first == o.id; })) continue;
         if (in && in->value.kind != catia::Value::Kind::Name && in->value.kind != catia::Value::Kind::Empty)
             bad("_InstanceName is not a name", o.offset);
         const std::string name = !in ? s.name(o.name) : in->value.kind == catia::Value::Kind::Name ? s.name(std::uint32_t(in->value.i)) : std::string();
-        const auto tok = catia::relation_header(o);
-        std::uint32_t parent = 0, child_node = 0;
-        if (startup_instance) {
-            if (tok.size() != 1 || !tok[0].is_number() || !o.startup.has_blob)
-                bad("instance '" + name + "' (SPEC v" + std::to_string(s.spec_version) + ") without a parent header and a linked startup", o.offset);
-            parent = std::uint32_t(tok[0].number);
-            child_node = document_node(catia::link_target(o.startup.blob, o.offset), name, ctx);
-        } else if (tok.size() == 3 && tok[0].is_blob && tok[1].is_number() && tok[2].is_number()) {
-            parent = std::uint32_t(tok[2].number);
+        auto tok = catia::relation_header(o);
+        auto form = [&] {
+            std::string f;
+            for (const auto& t : tok) f += t.is_blob ? " blob" : t.is_guid ? " guid" : t.is_index ? " index" : " " + std::to_string(t.number);
+            return "instance '" + name + "' (object " + std::to_string(o.id) + ", " + s.name(o.cls) + ") with an unknown relation header:" + f;
+        };
+        if (!tok.empty() && tok.front().is_index) tok.erase(tok.begin());  // the startup, by index
+        if (tok.empty() || !tok.back().is_number()) bad(form(), o.offset);
+        const std::uint32_t parent = std::uint32_t(tok.back().number);
+        std::uint32_t child_node = 0;
+        if (tok.size() >= 2 && tok[0].is_blob && (tok.size() == 2 || (tok.size() == 3 && tok[1].is_number()))) {
             child_node = document_node(catia::link_target(tok[0].blob, o.offset), name, ctx);
-        } else if (tok.size() == 2 && tok[0].is_number() && tok[1].is_number()) {
+        } else if (tok.size() == 2 && tok[0].is_number()) {
             if (const auto r = ref_node.find(std::uint32_t(tok[0].number)); r != ref_node.end()) {
                 used_refs.insert(r->first);
                 child_node = r->second;
@@ -289,11 +316,10 @@ std::uint32_t decode_product(ByteView data, const std::string& label, Context& c
             } else {
                 bad("instance '" + name + "' refers to " + std::to_string(tok[0].number) + ", neither a product reference nor a linked bag", o.offset);
             }
-            parent = std::uint32_t(tok[1].number);
+        } else if (tok.size() == 1 && o.startup.has_blob) {
+            child_node = document_node(catia::link_target(o.startup.blob, o.offset), name, ctx);
         } else {
-            std::string form;
-            for (const auto& t : tok) form += t.is_blob ? " blob" : t.is_guid ? " guid" : t.is_index ? " index" : " " + std::to_string(t.number);
-            bad("instance '" + name + "' (object " + std::to_string(o.id) + ", " + s.name(o.cls) + ") with an unknown relation header:" + form, o.offset);
+            bad(form(), o.offset);
         }
         const auto p = ref_node.find(parent);
         if (p == ref_node.end()) bad("instance '" + name + "' has parent object " + std::to_string(parent) + ", not a product reference", o.offset);
@@ -314,7 +340,7 @@ std::uint32_t decode_product(ByteView data, const std::string& label, Context& c
             }
         }
         if (placed > 1) bad("instance '" + name + "' has " + std::to_string(placed) + " positions", o.offset);
-        if (startup_instance) {
+        if (tok.size() == 1) {
             // In the one version-9 sample the instance's _RepresentedBy object carries an identity
             // _Position and its bag none; whether that object places the instance is not established.
             for (const auto& rel : catia::relations(s, o)) {
@@ -330,6 +356,29 @@ std::uint32_t decode_product(ByteView data, const std::string& label, Context& c
         const std::uint32_t inst = add_node(scene, name, t);
         scene.nodes[inst].children.push_back(child_node);
         scene.nodes[p->second].children.push_back(inst);
+    }
+
+    // A reference's default shape document: its bag of representations (_BagRepsList) names it in
+    // _DftRep, a document link. A link to this document itself (Gardena, R8) names no separate
+    // document: the shapes are then those of the bag's _Reps, reported below when unresolved.
+    const auto self = catia::document_uuid(data);
+    for (const auto& [id, node] : ref_node) {
+        const Object* ref = s.by_id(id);
+        if (!ref || !scene.nodes[node].children.empty()) continue;
+        std::vector<Uuid> docs;
+        for (const auto& rel : catia::relations(s, *ref)) {
+            if (s.name(rel.attr) != "_BagRepsList") continue;
+            for (const std::uint32_t b : rel.objects)
+                if (const Object* bag = s.by_id(b))
+                    if (const catia::Chunk* d = s.find(*bag, "_DftRep"))
+                        for (const auto& l : d->value.links)
+                            if (l.has_blob)
+                                if (const Uuid u = catia::link_target(l.blob, bag->offset); !self || u != *self) docs.push_back(u);
+        }
+        for (const Uuid& u : docs) {
+            const std::uint32_t doc = document_node(u, scene.nodes[node].name, ctx);
+            scene.nodes[node].children.push_back(doc);
+        }
     }
 
     // A reference may carry its own shape: _BagRepsList -> PRDBAGREP, _Reps -> PRDREP whose
