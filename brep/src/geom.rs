@@ -137,6 +137,43 @@ impl Surf for Moved {
     fn implicit(&self, p: V) -> Option<f64> { self.s.implicit(self.inv(p)) }
     fn uv_of(&self, p: V) -> [f64; 2] { self.s.uv_of(self.inv(p)) }
 }
+/// a surface restricted to a parameter window (e.g. the box of a face): a periodic direction stays periodic only
+/// when the window spans the whole period; poles stay poles only when the window reaches them
+pub struct Window<'a> { pub s: &'a dyn Surf, pub dom: [f64; 4] }
+impl<'a> Window<'a> {
+    /// window [u0, u1, v0, v1] clipped to the surface domain in bounded directions
+    pub fn new(s: &'a dyn Surf, w: [f64; 4]) -> Self {
+        let d = s.dom();
+        let full = |k: usize, per: bool| per && w[2 * k + 1] - w[2 * k] >= d[2 * k + 1] - d[2 * k];
+        let mut dom = w;
+        for k in 0..2 {
+            let per = if k == 0 { s.per_u() } else { s.per_v() };
+            if full(k, per) || !per { dom[2 * k] = w[2 * k].max(d[2 * k]); dom[2 * k + 1] = w[2 * k + 1].min(d[2 * k + 1]); }
+            if full(k, per) { dom[2 * k] = d[2 * k]; dom[2 * k + 1] = d[2 * k + 1]; }
+        }
+        Window { s, dom }
+    }
+}
+impl Surf for Window<'_> {
+    fn ev(&self, u: f64, v: f64) -> D2 { self.s.ev(u, v) }
+    fn dom(&self) -> [f64; 4] { self.dom }
+    fn per_u(&self) -> bool { self.s.per_u() && self.dom[0] <= self.s.dom()[0] && self.dom[1] >= self.s.dom()[1] }
+    fn per_v(&self) -> bool { self.s.per_v() && self.dom[2] <= self.s.dom()[2] && self.dom[3] >= self.s.dom()[3] }
+    fn poles_v(&self) -> bool { self.s.poles_v() && self.dom[2] <= self.s.dom()[2] && self.dom[3] >= self.s.dom()[3] }
+    fn implicit(&self, p: V) -> Option<f64> { self.s.implicit(p) }
+    /// the global inverse, moved by whole periods to the copy nearest the window
+    fn uv_of(&self, p: V) -> [f64; 2] {
+        let mut q = self.s.uv_of(p);
+        let d = self.s.dom();
+        for k in 0..2 {
+            if !(if k == 0 { self.s.per_u() } else { self.s.per_v() }) { continue; }
+            let per = d[2 * k + 1] - d[2 * k];
+            let mid = 0.5 * (self.dom[2 * k] + self.dom[2 * k + 1]);
+            q[k] -= ((q[k] - mid) / per).round() * per;
+        }
+        q
+    }
+}
 /// rows of the rotation whose columns are the given axes
 pub fn frame(x: V, y: V, z: V) -> [V; 3] { [[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]] }
 
@@ -172,5 +209,14 @@ pub fn uv_refine(s: &dyn Surf, p: V, g: [f64; 2]) -> [f64; 2] {
         if done { break; }
     }
     [u, v]
+}
+/// parameters of p continuing from a nearby point's parameters (walking along a curve on the surface): Newton from
+/// the guess for surfaces without a closed-form inverse, the global inverse when that fails or for analytic surfaces
+pub fn uv_from(s: &dyn Surf, p: V, guess: Option<[f64; 2]>, tol: f64) -> [f64; 2] {
+    if let (Some(g), None) = (guess, s.implicit(p)) {
+        let uv = uv_refine(s, p, g);
+        if norm(sub(s.ev(uv[0], uv[1]).p, p)) <= tol { return uv; }
+    }
+    s.uv_of(p)
 }
 pub fn dist(s: &dyn Surf, p: V) -> f64 { s.implicit(p).unwrap_or_else(|| { let uv = s.uv_of(p); norm(sub(s.ev(uv[0], uv[1]).p, p)) }) }

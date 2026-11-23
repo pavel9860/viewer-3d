@@ -157,8 +157,25 @@ fn boundary_events(w: &Body, tr: &Trim, s: &dyn Surf, other: &dyn Surf, weld: f6
 /// SSI of two faces restricted to both, with boundary events
 fn pair_pieces(w: &Body, trims: &[Trim], weld: f64, fa: Id<Face>, fb: Id<Face>) -> Vec<Piece> {
     let (sa, sb) = (w.faces.get(fa).surface.as_ref(), w.faces.get(fb).surface.as_ref());
+    // only the parts under the faces matter: intersect the surfaces over the faces' parameter boxes
+    let (wa, wb) = (window(sa, &trims[fa.ix()]), window(sb, &trims[fb.ix()]));
+    let t0 = std::time::Instant::now();
+    let curves = intersect(&wa, &wb).0;
+    if std::env::var("BREP_TIME").is_ok() && t0.elapsed().as_secs_f64() > 0.5 { eprintln!("  ssi {:.1} s, {} curves", t0.elapsed().as_secs_f64(), curves.len()); }
+    let out = restrict(w, trims, weld, fa, fb, curves);
+    if std::env::var("BREP_WIN").is_ok() {
+        let full = restrict(w, trims, weld, fa, fb, intersect(sa, sb).0);
+        let len = |ps: &[Piece]| ps.iter().map(|p| p.pts.windows(2).map(|q| norm(sub(q[1], q[0]))).sum::<f64>()).sum::<f64>();
+        if (len(&full) - len(&out)).abs() > 1e-6 { eprintln!("WIN faces src {} x {}: window {:?} pieces {} len {:.5} | full pieces {} len {:.5}", w.faces.get(fa).origin.src, w.faces.get(fb).origin.src, wa.dom(), out.len(), len(&out), full.len(), len(&full)); }
+    }
+    out
+}
+
+/// intersection curves of two faces' surfaces restricted to both faces, with boundary events
+fn restrict(w: &Body, trims: &[Trim], weld: f64, fa: Id<Face>, fb: Id<Face>, curves: Vec<crate::ssi::Curve>) -> Vec<Piece> {
+    let (sa, sb) = (w.faces.get(fa).surface.as_ref(), w.faces.get(fb).surface.as_ref());
     let mut out = vec![];
-    for c in intersect(sa, sb).0 {
+    for c in curves {
         if c.kind == Kind::Isolated || c.pts.len() < 2 { continue; }
         let mut pts = c.pts;
         let mut ev = vec![vec![]; pts.len()];
@@ -192,6 +209,13 @@ fn pair_pieces(w: &Body, trims: &[Trim], weld: f64, fa: Id<Face>, fb: Id<Face>) 
         }
     }
     out
+}
+
+/// the surface over the face's parameter box (raw parameters), padded by 2%
+fn window<'a>(s: &'a dyn Surf, tr: &Trim) -> Window<'a> {
+    let (u0, u1) = { let a = tr.raw([tr.bb[0], 0.0])[0]; let b = tr.raw([tr.bb[1], 0.0])[0]; (a.min(b), a.max(b)) };
+    let (pu, pv) = (0.02 * (u1 - u0) + 1e-9, 0.02 * (tr.bb[3] - tr.bb[2]) + 1e-9);
+    Window::new(s, [u0 - pu, u1 + pu, tr.bb[2] - pv, tr.bb[3] + pv])
 }
 
 /// vertices welded within a distance (uniform grid)
@@ -326,6 +350,8 @@ fn loops_of(w: &Body, f: Id<Face>, split: &HashMap<Id<Edge>, Vec<Id<Edge>>>) -> 
 /// boolean of two closed bodies
 pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
     let mut st = Stats::default();
+    let clock = std::time::Instant::now();
+    let lap = |what: &str| if std::env::var("BREP_TIME").is_ok() { eprintln!("  {what}: {:.0} ms", clock.elapsed().as_secs_f64() * 1e3); };
     let mut w = a.clone();
     w.tol = a.tol.max(b.tol);
     let boff = append(&mut w, b);
@@ -337,9 +363,17 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
     let overlap = |p: &[f64; 6], q: &[f64; 6]| (0..3).all(|k| p[2 * k] <= q[2 * k + 1] && q[2 * k] <= p[2 * k + 1]);
     let pairs: Vec<(Id<Face>, Id<Face>)> = fa.iter().flat_map(|&x| fb.iter().map(move |&y| (x, y))).filter(|(x, y)| overlap(&boxes[x.ix()], &boxes[y.ix()])).collect();
     st.pairs = pairs.len();
+    lap("trims, boxes, pairs");
     let weld_tol = (10.0 * w.tol).max(1e-7);
-    let pieces: Vec<Piece> = par::map(pairs.len(), workers, |i| pair_pieces(&w, &trims, weld_tol, pairs[i].0, pairs[i].1)).into_iter().flatten().collect();
+    let pieces: Vec<Piece> = par::map(pairs.len(), workers, |i| {
+        let t0 = std::time::Instant::now();
+        let r = pair_pieces(&w, &trims, weld_tol, pairs[i].0, pairs[i].1);
+        let dt = t0.elapsed().as_secs_f64();
+        if dt > 0.5 && std::env::var("BREP_TIME").is_ok() { eprintln!("  slow pair: faces src {} x {}: {dt:.1} s, {} pieces", w.faces.get(pairs[i].0).origin.src, w.faces.get(pairs[i].1).origin.src, r.len()); }
+        r
+    }).into_iter().flatten().collect();
     st.pieces = pieces.len();
+    lap("face-pair intersections");
 
     // vertices: every event point welded (existing vertices first), piece ends without events become vertices
     let mut weld = Weld { tol: weld_tol, grid: HashMap::new() };
@@ -419,6 +453,7 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
         }
     }
 
+    lap("vertices, splits, cut edges");
     // per face: arrangement, classification against the other body, selection
     for (i, &f) in faces.iter().enumerate() { loops0[i] = loops_of(&w, f, &split); }
     let (sol_a, sol_b) = (Solid::new(&w, &fa), Solid::new(&w, &fb));
@@ -450,6 +485,7 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
         (kept, n, dangling, on)
     });
 
+    lap("arrangements + classification");
     // result body
     let mut r = Body { tol: w.tol, ..Default::default() };
     let mut vmap: HashMap<Id<Vertex>, Id<Vertex>> = HashMap::new();

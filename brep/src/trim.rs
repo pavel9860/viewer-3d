@@ -75,7 +75,7 @@ impl Trim {
                 let n = p.len();
                 p[0] = b.vertices.get(v[0]).p;
                 p[n - 1] = b.vertices.get(v[1]).p;
-                let uv = p.iter().map(|&q| { let w = t.unwrap(prev, t.uv(s, q)); prev = Some(w); w }).collect();
+                let uv = p.iter().map(|&q| { let w = t.unwrap(prev, t.uv_near(s, q, prev)); prev = Some(w); w }).collect();
                 items.push(Item { e, sense, uv, p, t: ts, v });
             }
             t.loops.push(items);
@@ -97,6 +97,11 @@ impl Trim {
     fn ring(l: &[Item]) -> Vec<P2> { l.iter().flat_map(|it| it.uv[..it.uv.len() - 1].iter().copied()).collect() }
     /// normalized parameters of a point (base sheet)
     pub fn uv(&self, s: &dyn Surf, p: V) -> P2 { let q = s.uv_of(p); [self.sg * q[0], q[1]] }
+    /// normalized parameters of a point next to a known one (curve walking; see `uv_from`)
+    pub fn uv_near(&self, s: &dyn Surf, p: V, prev: Option<P2>) -> P2 {
+        let q = uv_from(s, p, prev.map(|g| self.raw(g)), 1e-4);
+        [self.sg * q[0], q[1]]
+    }
     /// raw surface parameters of a normalized point
     pub fn raw(&self, q: P2) -> P2 { [self.sg * q[0], q[1]] }
     /// q moved by whole periods next to `prev`
@@ -124,7 +129,7 @@ impl Trim {
     /// a 3D polyline on the surface in normalized UV, unwrapped and placed on the sheet where its middle is in the face
     pub fn polyline(&self, s: &dyn Surf, pts: &[V]) -> Vec<P2> {
         let mut prev = None;
-        let mut uv: Vec<P2> = pts.iter().map(|&p| { let w = self.unwrap(prev, self.uv(s, p)); prev = Some(w); w }).collect();
+        let mut uv: Vec<P2> = pts.iter().map(|&p| { let w = self.unwrap(prev, self.uv_near(s, p, prev)); prev = Some(w); w }).collect();
         let m = uv.len() / 2;
         let mid = if uv.len() % 2 == 0 { [(uv[m - 1][0] + uv[m][0]) / 2.0, (uv[m - 1][1] + uv[m][1]) / 2.0] } else { uv[m] };
         let sh = self.shift_into(mid).or_else(|| self.shifts().into_iter().min_by(|a, b| {

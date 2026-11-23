@@ -48,15 +48,8 @@ pub fn triangulate(outer: &[P2], holes: &[Vec<P2>]) -> (Vec<P2>, Vec<[usize; 3]>
     (pts, tris)
 }
 
-/// (1/3) ∫∫ p · (Su x Sv) over a UV triangle (signed by its UV orientation): degree-5 Dunavant rule after
-/// splitting until UV edges < 0.25
-fn integrate(s: &dyn Surf, a: P2, b: P2, c: P2, depth: u32) -> f64 {
-    let l = |p: P2, q: P2| (p[0] - q[0]).hypot(p[1] - q[1]);
-    if depth < 16 && l(a, b).max(l(b, c)).max(l(c, a)) > 0.25 {
-        let m = |p: P2, q: P2| [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
-        let (ab, bc, ca) = (m(a, b), m(b, c), m(c, a));
-        return integrate(s, a, ab, ca, depth + 1) + integrate(s, ab, b, bc, depth + 1) + integrate(s, ca, bc, c, depth + 1) + integrate(s, ab, bc, ca, depth + 1);
-    }
+/// degree-5 Dunavant rule for (1/3) ∫∫ p · (Su x Sv) over a UV triangle (signed by its UV orientation)
+fn rule(s: &dyn Surf, a: P2, b: P2, c: P2) -> f64 {
     const R: [(f64, f64, f64); 7] = [
         (1.0 / 3.0, 1.0 / 3.0, 0.225),
         (0.059715871789770, 0.470142064105115, 0.132394152788506), (0.470142064105115, 0.059715871789770, 0.132394152788506), (0.470142064105115, 0.470142064105115, 0.132394152788506),
@@ -68,6 +61,17 @@ fn integrate(s: &dyn Surf, a: P2, b: P2, c: P2, depth: u32) -> f64 {
         let d = s.ev(l1 * a[0] + l2 * b[0] + l3 * c[0], l1 * a[1] + l2 * b[1] + l3 * c[1]);
         w * dot(d.p, cross(d.u, d.v)) / 3.0
     }).sum::<f64>() * jac
+}
+/// adaptive quadrature: a triangle is split into 4 while the children's sum differs from its own rule by more than
+/// `tol` (absolute, shared out over the children); independent of the parameterization's scale
+fn integrate(s: &dyn Surf, a: P2, b: P2, c: P2, whole: f64, tol: f64, depth: u32) -> f64 {
+    let m = |p: P2, q: P2| [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+    let (ab, bc, ca) = (m(a, b), m(b, c), m(c, a));
+    let k = [(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)];
+    let parts = k.map(|t| rule(s, t.0, t.1, t.2));
+    let sum: f64 = parts.iter().sum();
+    if depth >= 10 || (sum - whole).abs() <= tol { return sum; }
+    (0..4).map(|i| integrate(s, k[i].0, k[i].1, k[i].2, parts[i], tol / 4.0, depth + 1)).sum()
 }
 
 pub fn face_trim(b: &Body, f: Id<Face>) -> Trim {
@@ -91,7 +95,7 @@ pub fn volume(b: &Body, faces: &[Id<Face>]) -> (f64, usize) {
             let want = area(o) + hs.iter().map(|h| area(h)).sum::<f64>();
             let got: f64 = tris.iter().map(|t| area(&[pts[t[0]], pts[t[1]], pts[t[2]]])).sum();
             if (got - want).abs() > 1e-9 * want.abs().max(1e-12) { bad += 1; }
-            sum += tris.iter().map(|tr| integrate(s, t.raw(pts[tr[0]]), t.raw(pts[tr[1]]), t.raw(pts[tr[2]]), 0)).sum::<f64>();
+            sum += tris.iter().map(|tr| { let (a, b, c) = (t.raw(pts[tr[0]]), t.raw(pts[tr[1]]), t.raw(pts[tr[2]])); integrate(s, a, b, c, rule(s, a, b, c), 1e-12, 0) }).sum::<f64>();
         }
         sum
     }).sum();

@@ -10,10 +10,13 @@ pub fn span(n: usize, p: usize, u: f64, k: &[f64]) -> usize {
     while u < k[mid] || u >= k[mid + 1] { if u < k[mid] { hi = mid; } else { lo = mid; } mid = (lo + hi) / 2; }
     mid
 }
-/// basis functions and their derivatives up to order 2 (The NURBS Book, A2.3)
-pub fn ders(i: usize, u: f64, p: usize, k: &[f64]) -> [Vec<f64>; 3] {
-    let mut ndu = vec![vec![0.0; p + 1]; p + 1];
-    let (mut left, mut right) = (vec![0.0; p + 1], vec![0.0; p + 1]);
+/// largest supported degree
+pub const MAXP: usize = 15;
+/// basis functions and their derivatives up to order 2 (The NURBS Book, A2.3), allocation-free; entries 0..=p
+pub fn ders(i: usize, u: f64, p: usize, k: &[f64]) -> [[f64; MAXP + 1]; 3] {
+    assert!(p <= MAXP, "B-spline degree {p} > {MAXP}");
+    let mut ndu = [[0.0; MAXP + 1]; MAXP + 1];
+    let (mut left, mut right) = ([0.0; MAXP + 1], [0.0; MAXP + 1]);
     ndu[0][0] = 1.0;
     for j in 1..=p {
         left[j] = u - k[i + 1 - j]; right[j] = k[i + j] - u;
@@ -22,9 +25,9 @@ pub fn ders(i: usize, u: f64, p: usize, k: &[f64]) -> [Vec<f64>; 3] {
         ndu[j][j] = saved;
     }
     let nd = 2.min(p);
-    let mut out = [vec![0.0; p + 1], vec![0.0; p + 1], vec![0.0; p + 1]];
+    let mut out = [[0.0; MAXP + 1]; 3];
     for j in 0..=p { out[0][j] = ndu[j][p]; }
-    let mut a = vec![vec![0.0; p + 1]; 2];
+    let mut a = [[0.0; MAXP + 1]; 2];
     for r in 0..=p {
         let (mut s1, mut s2) = (0, 1);
         a[0][0] = 1.0;

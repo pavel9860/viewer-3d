@@ -22,7 +22,10 @@ pub fn solve_n<const N: usize>(mut a: [[f64; N]; N], mut b: [f64; N]) -> Option<
     Some(x)
 }
 /// Damped Gauss-Newton on residual r(x) with a numeric Jacobian.
-pub fn gauss_newton(mut x: [f64; 4], m: usize, r: &dyn Fn(&[f64; 4], &mut [f64]), iters: usize) -> [f64; 4] {
+pub fn gauss_newton(x: [f64; 4], m: usize, r: &dyn Fn(&[f64; 4], &mut [f64]), iters: usize) -> [f64; 4] { gauss_newton_stall(x, m, r, iters, 0.0) }
+/// Gauss-Newton that also stops when a step reduces the squared residual by less than the fraction `stall`
+/// (a positive minimum: linear convergence on a nonzero residual)
+pub fn gauss_newton_stall(mut x: [f64; 4], m: usize, r: &dyn Fn(&[f64; 4], &mut [f64]), iters: usize, stall: f64) -> [f64; 4] {
     let (mut f0, mut f1) = (vec![0.0; m], vec![0.0; m]);
     let mut lam = 1e-12;
     for _ in 0..iters {
@@ -48,7 +51,7 @@ pub fn gauss_newton(mut x: [f64; 4], m: usize, r: &dyn Fn(&[f64; 4], &mut [f64])
             let xn = [x[0] + dx[0], x[1] + dx[1], x[2] + dx[2], x[3] + dx[3]];
             r(&xn, &mut f1);
             let c1: f64 = f1.iter().map(|v| v * v).sum();
-            if c1 < c0 { x = xn; lam = (lam * 0.1).max(1e-15); improved = true; break; }
+            if c1 < c0 { x = xn; lam = (lam * 0.1).max(1e-15); improved = c1 < (1.0 - stall) * c0; break; }
             lam *= 10.0;
         }
         if !improved { break; }
@@ -106,10 +109,16 @@ impl Ctx<'_> {
             let (a, b) = self.eval(&x);
             let tv = cross(cross(a.u, a.v), cross(b.u, b.v));
             let t = if norm(tv) > 1e-12 { unit(tv) } else { unit(sub(p, a.p)) };
-            if let Some(y) = self.correct(x, p, t) { if norm(sub(self.a.ev(y[0], y[1]).p, p)) < 1e-7 { return true; } }
+            // p is on the traced part only if it is within one tracer step of x and the curve between them stays in
+            // the domain (a curve leaving a bounded window and re-entering it is a different traced part)
+            let same_arc = |c: &Self| d <= 0.1 * 1.01 && {
+                let m = mulv(addv(a.p, p), 0.5);
+                c.correct(x, m, t).map_or(true, |z| c.violated(&z).is_none())
+            };
+            if let Some(y) = self.correct(x, p, t) { if norm(sub(self.a.ev(y[0], y[1]).p, p)) < 1e-7 && same_arc(self) { return true; } }
             let r = |y: &[f64; 4], f: &mut [f64]| { let (a, b) = self.eval(y); f[..3].copy_from_slice(&sub(a.p, b.p)); f[3] = dot(t, sub(a.p, p)); };
             let y = gauss_newton(x, 4, &r, 40);
-            if self.gap(&y) < self.tol && norm(sub(self.a.ev(y[0], y[1]).p, p)) < 1e-5 { return true; }
+            if self.gap(&y) < self.tol && norm(sub(self.a.ev(y[0], y[1]).p, p)) < 1e-5 && same_arc(self) { return true; }
             if self.ang > 1e-6 {
                 // tolerant contact: the seed lies somewhere in the contact band; project it onto the ridge with the
                 // tracer's own least-squares functional and compare with the traced ridge
@@ -340,11 +349,21 @@ pub fn intersect_tol(a: &dyn Surf, b: &dyn Surf, tol: f64, ang: f64) -> (Vec<Cur
         v
     };
     let (sa, sb) = (samp(a), samp(b));
+    // largest grid cell (corner span, doubled for curvature bulge): every surface point is within it of a sample
+    let cell = |g: &[(f64, f64, V)]| {
+        let mut m: f64 = 0.0;
+        for i in 0..n - 1 { for j in 0..n - 1 {
+            let q = [g[i * n + j].2, g[(i + 1) * n + j].2, g[i * n + j + 1].2, g[(i + 1) * n + j + 1].2];
+            for x in 0..4 { for y in x + 1..4 { m = m.max(norm(sub(q[x], q[y]))); } }
+        } }
+        2.0 * m
+    };
+    let reach = cell(&sa) + cell(&sb) + tol;
     let mut curves: Vec<Curve> = vec![];
     let mut branches: Vec<[f64; 4]> = vec![];
     let covered = |curves: &Vec<Curve>, p: V, tol: f64| curves.iter().any(|cv| {
         if cv.pts.len() == 1 { return norm(sub(cv.pts[0], p)) < tol; }
-        cv.pts.windows(2).any(|w| { let ab = sub(w[1], w[0]); let t = (dot(sub(p, w[0]), ab) / dot(ab, ab).max(1e-300)).clamp(0.0, 1.0); norm(sub(p, addv(w[0], mulv(ab, t)))) < tol + 0.03 * norm(ab) })
+        cv.pts.windows(2).any(|w| { let ab = sub(w[1], w[0]); let t = (dot(sub(p, w[0]), ab) / dot(ab, ab).max(1e-300)).clamp(0.0, 1.0); norm(sub(p, addv(w[0], mulv(ab, t)))) < tol + 4.0 * SAG })
     });
     let r3 = |x: &[f64; 4], f: &mut [f64]| { let (pa, pb) = (a.ev(x[0], x[1]).p, b.ev(x[2], x[3]).p); f[..3].copy_from_slice(&sub(pa, pb)); };
     let trace_from = |s: [f64; 4], curves: &mut Vec<Curve>, branches: &mut Vec<[f64; 4]>| {
@@ -378,9 +397,25 @@ pub fn intersect_tol(a: &dyn Surf, b: &dyn Surf, tol: f64, ang: f64) -> (Vec<Cur
         pts.pop(); pts.extend(f);
         curves.push(Curve { pts, ends: (e2, e1), kind: Kind::Transversal });
     };
-    for &(ua, va, pa) in &sa {
-        let &(ub, vb, _) = sb.iter().min_by(|x, y| norm(sub(x.2, pa)).total_cmp(&norm(sub(y.2, pa)))).unwrap();
-        let mut s = gauss_newton([ua, va, ub, vb], 3, &r3, 80);
+    // seeds from both grids (each sample with the nearest sample of the other surface), so a narrow surface
+    // window does not see only the crossings its few samples converge to
+    let near = |g: &[(f64, f64, V)], p: V| *g.iter().min_by(|x, y| norm(sub(x.2, p)).total_cmp(&norm(sub(y.2, p)))).unwrap();
+    let seeds: Vec<[f64; 4]> = sa.iter().map(|&(ua, va, pa)| { let (ub, vb, pb) = near(&sb, pa); (norm(sub(pb, pa)), [ua, va, ub, vb]) })
+        .chain(sb.iter().map(|&(ub, vb, pb)| { let (ua, va, pa) = near(&sa, pb); (norm(sub(pb, pa)), [ua, va, ub, vb]) }))
+        // no intersection within one cell of either sample: nothing to find from this seed
+        .filter(|x| x.0 <= reach).map(|x| x.1).collect();
+    for [ua, va, ub, vb] in seeds {
+        let mut s = gauss_newton_stall([ua, va, ub, vb], 3, &r3, 80, 0.01);
+        // a seed that converged outside the domain: the curve may still enter the domain, through the bound it
+        // violates; pull it onto that bound (intersection with the parameter fixed there)
+        for _ in 0..2 {
+            let Some((k, val)) = c.violated(&s) else { break };
+            let rb = |x: &[f64; 4], f: &mut [f64]| { r3(x, &mut f[..3]); f[3] = x[k] - val; };
+            let mut y = s;
+            y[k] = val;
+            s = gauss_newton(y, 4, &rb, 40);
+            s[k] = val;
+        }
         // NaN-safe: a NaN gap must never pass a tolerance test
         if !(c.gap(&s) <= c.tol) || s.iter().any(|v| !v.is_finite()) || c.violated(&s).is_some() { continue; }
         c.wrap(&mut s);

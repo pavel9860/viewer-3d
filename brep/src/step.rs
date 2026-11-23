@@ -49,7 +49,8 @@ pub fn curve(m: &M, id: u32) -> Option<Box<dyn Crv>> {
             };
             let w: Vec<f64> = m.part(id, "RATIONAL_B_SPLINE_CURVE").map(|r| lst(&r[0]).iter().map(num).collect()).unwrap_or(vec![1.0; pts.len()]);
             let cp = pts.iter().zip(&w).map(|(p, w)| { let q = m.pt(rf(p)); [q[0] * w, q[1] * w, q[2] * w, *w] }).collect();
-            Some(Box::new(BspC { p: deg as usize, k: expand(mults, knots), cp }))
+            // degrees above MAXP are reported as unsupported
+            (deg as usize <= MAXP).then(|| Box::new(BspC { p: deg as usize, k: expand(mults, knots), cp }) as Box<dyn Crv>)
         }
         _ => None,
     }
@@ -90,6 +91,7 @@ pub fn surface(m: &M, id: u32, pts: &[V]) -> Option<(Box<dyn Surf>, &'static str
                 Some(b) => { let kk = m.part(id, "B_SPLINE_SURFACE_WITH_KNOTS")?; (num(&b[0]), num(&b[1]), lst(&b[2]), expand(lst(&kk[0]), lst(&kk[2])), expand(lst(&kk[1]), lst(&kk[3]))) }
                 None => (num(&a[1]), num(&a[2]), lst(&a[3]), expand(lst(&a[8]), lst(&a[10])), expand(lst(&a[9]), lst(&a[11]))),
             };
+            if pu as usize > MAXP || pv as usize > MAXP { return None; }
             let w: Option<Vec<Vec<f64>>> = m.part(id, "RATIONAL_B_SPLINE_SURFACE").map(|r| lst(&r[0]).iter().map(|row| lst(row).iter().map(num).collect()).collect());
             let cp = rows.iter().enumerate().map(|(i, row)| lst(row).iter().enumerate().map(|(j, p)| { let q = m.pt(rf(p)); let ww = w.as_ref().map_or(1.0, |w| w[i][j]); [q[0] * ww, q[1] * ww, q[2] * ww, ww] }).collect()).collect();
             (Box::new(BspS { pu: pu as usize, pv: pv as usize, ku, kv, cp }), "bspline")
