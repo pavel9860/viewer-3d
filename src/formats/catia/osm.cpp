@@ -186,7 +186,7 @@ void parse_records(Stream& s) {
         try {
             ob.chunks = attribute_record(ob.record, ob.record_offset);
         } catch (const DecodeError& e) {
-            fail(e.code(), std::string(e.what()) + " [object " + std::to_string(ob.id) + " of class " + s.name(ob.cls) + "]", e.offset());
+            fail(e.code(), e.message() + " [object " + std::to_string(ob.id) + " of class " + s.name(ob.cls) + "]", e.offset());
         }
         for (const Chunk& c : ob.chunks) {
             if (c.attr >= s.names.size()) bad("attribute outside the name table", ob.offset);

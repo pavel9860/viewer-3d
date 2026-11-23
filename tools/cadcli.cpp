@@ -701,7 +701,9 @@ static int cmd_objects(int argc, char** argv) {
     const std::string filter = argc > 3 ? argv[3] : "";
     try {
         auto streams = formats::catia::parse_streams(ByteView(bytes.data(), bytes.size()));
-        for (auto& sp : formats::catia::parse_spec_streams(ByteView(bytes.data(), bytes.size()))) streams.push_back(std::move(sp));
+        auto spec = formats::catia::parse_spec_streams(ByteView(bytes.data(), bytes.size()));
+        for (const auto& f : spec.failed) std::printf("container @%zu (%zu bytes) not decoded: %s (at byte %zu)\n", f.offset, f.size, f.message.c_str(), f.error_offset);
+        for (auto& sp : spec.streams) streams.push_back(std::move(sp));
         for (auto& st : streams) {
             formats::catia::parse_records(st);
             std::printf("stream @%zu: %zu objects%s\n", st.offset, st.objects.size(), st.spec_version ? (" (SPEC v" + std::to_string(st.spec_version) + ")").c_str() : "");

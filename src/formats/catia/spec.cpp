@@ -1,5 +1,6 @@
 #include "formats/catia/spec.hpp"
 
+#include <cstdio>
 #include <limits>
 #include <memory>
 
@@ -187,6 +188,7 @@ void relation_block(Cur& c, Names& name, Object& o) {
             const std::uint64_t v = relation_value(c, r.links);
             if (v != kNoObject) r.objects.push_back(std::uint32_t(v));
         };
+        try {
         if (chunk->array()) {  // count, an index into the list (< count; not interpreted), elements
             const std::uint64_t n = c.compact();
             if (n > c.v.size) bad("relation count exceeds the container", c.base + c.k);
@@ -194,6 +196,11 @@ void relation_block(Cur& c, Names& name, Object& o) {
             for (std::uint64_t i = 0; i < n; ++i) one();
         } else {
             one();
+        }
+        } catch (const DecodeError& e) {
+            char t[64];
+            std::snprintf(t, sizeof t, "attribute type e8 %02x %02x %s", chunk->flags, chunk->code, chunk->array() ? "array" : "single");
+            fail(e.code(), e.message() + " [" + t + "]", e.offset());
         }
         o.rels.push_back(std::move(r));
     }
@@ -248,8 +255,11 @@ Stream container(ByteView v, std::size_t base, std::shared_ptr<const std::vector
         while (c.peek() != 0xfe) name(c);
     if (osmb || osmn || layout.header_fe) c.expect(0xfe, "container header end");
     const std::uint64_t highest = c.compact();
+    std::string where = "object list";  // the grammar position, named in errors
+    try {
     while (c.peek() != 0xde) {
         Object o;
+        where = "object " + std::to_string(s.objects.size() + 1) + " at byte " + std::to_string(c.base + c.k) + " (SPEC v" + std::to_string(s.spec_version) + ")";
         object(c, layout, name, o, s.objects.empty());
         if (!s.objects.empty() && o.id <= s.objects.back().id) bad("object ids do not increase", o.offset);
         if (o.id > highest) bad("object id above the container's highest id", o.offset);
@@ -257,12 +267,17 @@ Stream container(ByteView v, std::size_t base, std::shared_ptr<const std::vector
     }
     if (s.objects.empty()) bad("SPEC container without objects", base);
     ++c.k;
-    for (Object& o : s.objects) {
-        o.relation_offset = c.base + c.k;
-        relation_block(c, name, o);
+    for (std::size_t i = 0; i < s.objects.size(); ++i) {
+        s.objects[i].relation_offset = c.base + c.k;
+        where = "relation block of object " + std::to_string(i + 1) + " at byte " + std::to_string(c.base + c.k) + " (SPEC v" + std::to_string(s.spec_version) + ")";
+        relation_block(c, name, s.objects[i]);
     }
+    where = "property tables";
     property_tables(c, name);
     if (v.size - c.k >= 8) bad("bytes after the SPEC container", c.base + c.k);  // < 8: padding
+    } catch (const DecodeError& e) {
+        fail(e.code(), e.message() + " [" + where + "]", e.offset());
+    }
     // the empty name gets the last number
     const std::uint32_t empty = std::uint32_t(s.names.size());
     s.names.emplace_back();
@@ -288,8 +303,8 @@ Stream container(ByteView v, std::size_t base, std::shared_ptr<const std::vector
 
 }  // namespace
 
-std::vector<Stream> parse_spec_streams(ByteView file) {
-    std::vector<Stream> out;
+SpecStreams parse_spec_streams(ByteView file) {
+    SpecStreams out;
     if (file.size < 8 || std::memcmp(file.data, "V5_CFV", 6) != 0) return out;
     const Store store = read_store(file);
     const StreamInfo* info = store.find("Data");
@@ -309,8 +324,14 @@ std::vector<Stream> parse_spec_streams(ByteView file) {
             const std::uint64_t len = 8 * std::uint64_t(le32(d + q + 4));
             if (len < 8 || q + len > end) bad("Data item length out of range", base + q);
             const bool spec = std::memcmp(d + q + 8, "SPEC", 4) == 0 || std::memcmp(d + q + 8, "OSMB", 4) == 0 || std::memcmp(d + q + 8, "OSMN", 4) == 0;
-            if ((tag == 4 || tag == 5) && len >= 12 && spec)
-                out.push_back(container(ByteView(d + q + 8, std::size_t(len - 8)), base + q + 8, bytes));
+            if ((tag == 4 || tag == 5) && len >= 12 && spec) {
+                const ByteView body(d + q + 8, std::size_t(len - 8));
+                try {
+                    out.streams.push_back(container(body, base + q + 8, bytes));
+                } catch (const DecodeError& e) {
+                    out.failed.push_back({base + q + 8, body.size, body.find("_PartNumber", 0, body.size) != ByteView::npos, e.code(), e.message(), e.offset()});
+                }
+            }
             q += std::size_t(len);
         }
         a = std::size_t(end);

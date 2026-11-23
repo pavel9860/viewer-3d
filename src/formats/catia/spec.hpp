@@ -36,15 +36,32 @@
 //   13: byte e7+n (n = 1..8; 485 values), a form byte, n bytes.
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "cadcore/bytes.hpp"
+#include "cadcore/error.hpp"
 #include "formats/catia/osm.hpp"
 
 namespace cadcore::formats::catia {
 
-// The SPEC containers of the file's Data stream, as object streams (relations and headers
-// decoded, records parsed); empty when the file has none. Throws DecodeError on any residue.
-std::vector<Stream> parse_spec_streams(ByteView file);
+// A container that could not be decoded: its place in the Data stream and the reason.
+struct FailedContainer {
+    std::size_t offset = 0;  // in the Data stream
+    std::size_t size = 0;
+    bool has_products = false;  // its bytes name `_PartNumber` (it may hold product references)
+    ErrorCode code = ErrorCode::Malformed;
+    std::string message;                    // without the code prefix
+    std::size_t error_offset = DecodeError::npos;  // where decoding stopped
+};
+
+struct SpecStreams {
+    std::vector<Stream> streams;          // decoded containers (relations and headers decoded, records parsed)
+    std::vector<FailedContainer> failed;  // each container is decoded on its own; residue or an unknown form fails only it
+};
+
+// The SPEC containers of the file's Data stream; empty when the file has none. Throws DecodeError
+// when the Data stream's section layout itself is malformed.
+SpecStreams parse_spec_streams(ByteView file);
 
 }  // namespace cadcore::formats::catia

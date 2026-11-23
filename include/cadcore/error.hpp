@@ -24,12 +24,15 @@ public:
     ErrorCode code() const noexcept { return code_; }
     // Byte offset where decoding stopped, or npos when not applicable.
     std::size_t offset() const noexcept { return offset_; }
+    // The message without the code prefix and offset suffix of what(), for wrapping with context.
+    const std::string& message() const noexcept { return message_; }
 
     static constexpr std::size_t npos = static_cast<std::size_t>(-1);
 
 private:
     ErrorCode code_;
     std::size_t offset_;
+    std::string message_;
 };
 
 [[noreturn]] void fail(ErrorCode code, const std::string& message, std::size_t offset = DecodeError::npos);

@@ -26,7 +26,8 @@ DecodeError::DecodeError(ErrorCode code, const std::string& message, std::size_t
     : std::runtime_error(std::string(to_string(code)) + ": " + message +
                          (offset == npos ? std::string() : " (at byte " + std::to_string(offset) + ")")),
       code_(code),
-      offset_(offset) {}
+      offset_(offset),
+      message_(message) {}
 
 void fail(ErrorCode code, const std::string& message, std::size_t offset) { throw DecodeError(code, message, offset); }
 

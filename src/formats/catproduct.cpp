@@ -158,13 +158,21 @@ Stream& product_stream(std::vector<Stream>& streams) {
 
 // The OSM streams of the file, or its SPEC containers (R11-era files) when no OSM stream holds
 // product references.
-std::vector<Stream> object_streams(ByteView data) {
+// A SPEC container that may hold product references and failed is fatal; any other failed
+// container is reported in `warnings` (its content is lost, the product structure is not).
+std::vector<Stream> object_streams(ByteView data, std::vector<std::string>& warnings) {
     auto streams = catia::parse_streams(data);
     const bool osm_products = std::any_of(streams.begin(), streams.end(), [](const Stream& s) {
         return std::find(s.names.begin(), s.names.end(), "_PartNumber") != s.names.end();
     });
-    if (!osm_products) streams = catia::parse_spec_streams(data);
-    return streams;
+    if (osm_products) return streams;
+    catia::SpecStreams spec = catia::parse_spec_streams(data);
+    for (const auto& f : spec.failed) {
+        if (f.has_products) fail(f.code, "product container not decoded: " + f.message, f.error_offset);
+        warnings.push_back("object container at Data byte " + std::to_string(f.offset) + " (" + std::to_string(f.size) +
+                           " bytes) not decoded, its content is lost: " + f.message + " (at byte " + std::to_string(f.error_offset) + ")");
+    }
+    return std::move(spec.streams);
 }
 
 // SPEC containers name no product classes; a reference's application content shows as
@@ -191,9 +199,9 @@ std::optional<Uuid> bag_link(const Stream& s, const Object& o) {
 }
 
 std::uint32_t decode_product(ByteView data, const std::string& label, Context& ctx) {
-    auto streams = object_streams(data);
-    const Stream& s = product_stream(streams);
     Scene& scene = ctx.scene;
+    auto streams = object_streams(data, scene.warnings);
+    const Stream& s = product_stream(streams);
 
     // References.
     std::map<std::uint32_t, std::uint32_t> ref_node;  // object id -> node
