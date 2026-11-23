@@ -1,5 +1,7 @@
 //! B-rep kernel core.
 pub mod boolean;
+pub mod cgm;
+pub mod cgm_mesh;
 pub mod check;
 pub mod classify;
 pub mod exact;
