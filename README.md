@@ -3,6 +3,8 @@
 Research spikes for a browser-first B-rep kernel (Rust, WASM). Separate from the format decoders (`../cadcore`, `../catia`).
 
 ```
+brep/         kernel core: geom, nurbs, p21, topo (chunked COW arena, typed ids, provenance, tolerances),
+              step (STEP -> Body import), check (topology + geometry validator); `brep check FILE|LIST`
 kcore/        no_std shared math (PRNG, hash, own sin/sqrt, synthetic + real mesh workloads); native and wasm32
 spike/src/
   geom.rs       vectors, Surf trait, analytic surfaces, placement, point inversion
@@ -22,6 +24,7 @@ tools/        export_parts.py (CATIA -> PLY via cadcli)
 
 ```bash
 cargo build --release -j4
+./target/release/brep check spike/catia_steps.tsv   # import + validate 15 CATIA STEP files, ~40 s
 cargo test --release -j4
 ./target/release/spike ssi                         # 7 hard SSI cases, < 1 s
 ./target/release/spike stress 60                   # 600 random SSI trials, ~9 s
@@ -34,6 +37,6 @@ python3 -I tools/export_parts.py samples/catia DATA ../cadcore/build/cadcli "ASS
 wasm/build.sh && cp DATA/parts.* web/              # then serve web/ (python3 -I web/serve.py) and open it
 ```
 
-Status (2026-11-23): SSI 7/7, stress 600/600, booleans 7/7 (closed shells, volume error <= 1.6e-5), STEP edges
+Status (2026-11-23): brep import + check of 15 CATIA STEP files (83k edges, 13.9k faces): 0 violations; SSI 7/7, stress 600/600, booleans 7/7 (closed shells, volume error <= 1.6e-5), STEP edges
 27,782 with 0 misses, exact predicates 0 wrong signs; browser results bit-identical to native, 3.8-4.1x on 4 workers.
 Resources: at most 4 workers, 8 GB per process.

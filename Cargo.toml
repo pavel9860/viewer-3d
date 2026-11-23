@@ -1,5 +1,5 @@
 [workspace]
-members = ["kcore", "spike"]
+members = ["kcore", "brep", "spike"]
 exclude = ["wasm"]
 resolver = "2"
 

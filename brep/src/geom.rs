@@ -13,7 +13,7 @@ pub fn unit(a: V) -> V { mulv(a, 1.0 / norm(a)) }
 /// Point with first and second partial derivatives.
 pub struct D2 { pub p: V, pub u: V, pub v: V, pub uu: V, pub uv: V, pub vv: V }
 
-pub trait Surf: Sync {
+pub trait Surf: Send + Sync {
     fn ev(&self, u: f64, v: f64) -> D2;
     /// [u0, u1, v0, v1]
     fn dom(&self) -> [f64; 4];

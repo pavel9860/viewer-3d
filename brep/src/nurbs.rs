@@ -76,15 +76,26 @@ impl Surf for BspS {
 }
 
 /// curve with first and second derivative
-pub trait Crv: Sync { fn ev(&self, t: f64) -> (V, V, V); fn range(&self) -> (f64, f64); fn periodic(&self) -> bool { false } }
+pub trait Crv: Send + Sync {
+    fn ev(&self, t: f64) -> (V, V, V);
+    fn range(&self) -> (f64, f64);
+    fn periodic(&self) -> bool { false }
+    /// closed-form parameter of the closest point, where one exists
+    fn param_of(&self, _p: V) -> Option<f64> { None }
+}
 pub struct LineC { pub o: V, pub d: V }
-impl Crv for LineC { fn ev(&self, t: f64) -> (V, V, V) { (addv(self.o, mulv(self.d, t)), self.d, [0.0; 3]) } fn range(&self) -> (f64, f64) { (-1e3, 1e3) } }
+impl Crv for LineC {
+    fn ev(&self, t: f64) -> (V, V, V) { (addv(self.o, mulv(self.d, t)), self.d, [0.0; 3]) }
+    fn range(&self) -> (f64, f64) { (-1e300, 1e300) }
+    fn param_of(&self, p: V) -> Option<f64> { Some(dot(sub(p, self.o), self.d) / dot(self.d, self.d)) }
+}
 /// circle (a = b) or ellipse
 pub struct ConicC { pub c: V, pub x: V, pub y: V, pub a: f64, pub b: f64 }
 impl Crv for ConicC {
     fn ev(&self, t: f64) -> (V, V, V) { let (s, c) = t.sin_cos(); (addv(self.c, addv(mulv(self.x, self.a * c), mulv(self.y, self.b * s))), addv(mulv(self.x, -self.a * s), mulv(self.y, self.b * c)), addv(mulv(self.x, -self.a * c), mulv(self.y, -self.b * s))) }
     fn range(&self) -> (f64, f64) { (0.0, 2.0 * PI) }
     fn periodic(&self) -> bool { true }
+    fn param_of(&self, p: V) -> Option<f64> { let q = sub(p, self.c); Some((dot(q, self.y) / self.b).atan2(dot(q, self.x) / self.a).rem_euclid(2.0 * PI)) }
 }
 pub struct BspC { pub p: usize, pub k: Vec<f64>, pub cp: Vec<[f64; 4]> }
 impl Crv for BspC {
@@ -105,10 +116,10 @@ impl Crv for BspC {
     }
     fn range(&self) -> (f64, f64) { (self.k[self.p], self.k[self.k.len() - 1 - self.p]) }
 }
-/// closest curve parameter on the curve's range (bounded to ±100 for lines)
+/// closest curve parameter on the curve's range (closed form where the curve provides one)
 pub fn t_of(c: &dyn Crv, p: V) -> f64 {
+    if let Some(t) = c.param_of(p) { return t; }
     let (a, b) = c.range();
-    let (a, b) = if b - a > 1e2 { (-1e2, 1e2) } else { (a, b) };
     let n = 200;
     let mut best = (a, f64::MAX);
     for i in 0..=n { let t = a + (b - a) * i as f64 / n as f64; let d = norm(sub(c.ev(t).0, p)); if d < best.1 { best = (t, d); } }

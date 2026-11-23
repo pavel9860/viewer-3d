@@ -9,15 +9,13 @@
 mod bench;
 mod boolean;
 mod exact;
-mod geom;
 mod k;
 mod ssi;
 mod ssi_cases;
-mod nurbs;
-mod p21;
 mod real;
 mod step;
 
+pub use brep::{geom, nurbs, p21};
 use std::time::Instant;
 pub fn ms(t: Instant) -> f64 { t.elapsed().as_secs_f64() * 1e3 }
 
