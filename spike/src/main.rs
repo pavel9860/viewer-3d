@@ -2,6 +2,8 @@
 //!   spike ssi                 hand-made SSI cases
 //!   spike stress [TRIALS]     randomized SSI stress (default 60 per family)
 //!   spike step LIST [opts]    CATIA STEP edge check (see step.rs)
+//!   spike pred                exact predicate benchmark
+mod exact;
 mod geom;
 mod k;
 mod ssi;
@@ -19,6 +21,7 @@ fn main() {
         Some("ssi") => ssi_cases::cases(),
         Some("stress") => ssi_cases::stress(args.get(2).and_then(|v| v.parse().ok()).unwrap_or(60)),
         Some("step") => step::run(&args[2..]),
+        Some("pred") => exact::bench(),
         _ => { eprintln!("usage: spike ssi | stress [N] | step LIST [--full] [--pair KIND] [--file NAME]"); 2 }
     };
     std::process::exit(code.min(1) as i32);
