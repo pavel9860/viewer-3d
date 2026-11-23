@@ -1,0 +1,418 @@
+#include "formats/catia/cgm_model.hpp"
+
+#include <algorithm>
+#include <cstring>
+#include <functional>
+#include <optional>
+#include <unordered_map>
+
+#include "cadcore/error.hpp"
+
+namespace cadcore::formats::catia::cgm {
+namespace {
+
+[[noreturn]] void bad(const std::string& what, std::size_t at) { fail(ErrorCode::Malformed, "CGM record: " + what, at); }
+
+struct Obj {
+    std::uint16_t type = 0;
+    std::vector<std::uint32_t> refs;
+    ByteView p;  // payload after the reference list
+    std::size_t at = 0;
+};
+
+// Sequential reader over a payload in the stream's byte order.
+struct Rd {
+    ByteView b;
+    bool big;
+    std::size_t k = 0, at = 0;
+    void need(std::size_t n) const { if (k + n > b.size) fail(ErrorCode::Truncated, "CGM payload ends early", at + k); }
+    double f64() {
+        need(8);
+        std::uint8_t t[8];
+        for (int i = 0; i < 8; ++i) t[i] = b[k + (big ? 7 - i : i)];
+        double d;
+        std::memcpy(&d, t, 8);
+        k += 8;
+        return d;
+    }
+    std::int32_t i32() { need(4); auto v = std::int32_t(load_u32(b.data + k, big)); k += 4; return v; }
+    std::int16_t i16() { need(2); auto v = std::int16_t(load_u16(b.data + k, big)); k += 2; return v; }
+    std::uint8_t u8() { need(1); return b[k++]; }
+    std::uint32_t var() { return varint(b, k); }
+    // A count: a varint, or a raw u32 in streams of the oldest releases (low byte < 0x80, then 00 00 00).
+    std::uint32_t count() {
+        if (k + 4 <= b.size && b[k] < 0x80 && b[k + 1] == 0 && b[k + 2] == 0 && b[k + 3] == 0) return std::uint32_t(i32());
+        return var();
+    }
+    std::size_t left() const { return b.size - k; }
+};
+
+struct KnotVector { int degree = 0; std::vector<double> knots; std::vector<int> mults; std::size_t poles() const { std::size_t n = 0; for (int m : mults) n += std::size_t(m); return n - std::size_t(degree) - 1; } };
+
+KnotVector knot_vector(Rd& r) {
+    KnotVector kv;
+    kv.degree = r.i32();
+    r.i32();
+    r.i32();
+    const int n = r.i32();
+    r.i32();
+    if (n < 2 || n > 100000) bad("knot count out of range", r.at + r.k);
+    for (int i = 0; i < n; ++i) kv.knots.push_back(r.f64());
+    for (int i = 0; i < n; ++i) kv.mults.push_back(r.i32());
+    return kv;
+}
+
+class Decoder {
+public:
+    Decoder(const Stream& s) : s_(s) {
+        for (const Record& rec : s.records) {
+            Obj o;
+            o.type = rec.type;
+            o.at = rec.offset;
+            std::size_t k = 0;
+            const std::uint32_t n = varint(rec.body, k);
+            for (std::uint32_t i = 0; i < n; ++i) o.refs.push_back(varint(rec.body, k));
+            o.p = ByteView(rec.body.data + k, rec.body.size - k);
+            objs_.emplace(rec.id, std::move(o));
+        }
+    }
+
+    Ir run() {
+        for (const Record& rec : s_.records)
+            if (rec.type == 520) shell(rec.id);
+        out_.vertices = std::uint32_t(vertex_.size());
+        return std::move(out_);
+    }
+
+private:
+    const Stream& s_;
+    std::unordered_map<std::uint32_t, Obj> objs_;
+    std::unordered_map<std::uint32_t, std::uint32_t> surface_, pcurve_, edge_, vertex_;
+    std::unordered_map<std::uint32_t, std::optional<std::uint32_t>> face_;
+    Ir out_;
+
+    const Obj& obj(std::uint32_t id) const {
+        auto it = objs_.find(id);
+        if (it == objs_.end()) bad("reference to a missing object " + std::to_string(id), 0);
+        return it->second;
+    }
+    Rd rd(const Obj& o) const { return Rd{o.p, s_.big, 0, o.at}; }
+
+    std::uint32_t surface(std::uint32_t id) {
+        if (auto it = surface_.find(id); it != surface_.end()) return it->second;
+        const Obj& o = obj(id);
+        if (o.type == 212 || o.type == 241) {
+            const std::uint32_t r = surface(o.refs.at(0));
+            surface_[id] = r;
+            return r;
+        }
+        Ir::Surface sf;
+        sf.id = id;
+        Rd r = rd(o);
+        auto vec = [&](int n) { for (int i = 0; i < n; ++i) sf.p.push_back(r.f64()); };
+        switch (o.type) {
+            case 200: {
+                sf.kind = SurfPlane;
+                if (o.p.size == 120) {
+                    vec(9);
+                } else if (o.p.size % 8 == 1) {
+                    vec(3);
+                    const std::uint8_t mask = r.u8();
+                    for (int j = 0; j < 6; ++j) sf.p.push_back(mask >> j & 1 ? 0.0 : r.f64());
+                } else {
+                    bad("plane payload length", o.at);
+                }
+                break;
+            }
+            case 201: {
+                if (o.p.size / 8 < 15) bad("cylinder payload length", o.at);
+                sf.kind = SurfCylinder;
+                vec(9);
+                const double rad = r.f64();
+                r.k += 4 * 8;
+                const double su = r.f64();
+                sf.p.push_back(rad);
+                sf.p.push_back(rad * su);
+                break;
+            }
+            case 203: sf.kind = SurfSphere; vec(12); sf.p.push_back(r.f64()); break;
+            case 204: sf.kind = SurfTorus; vec(14); break;
+            case 231: {
+                sf.kind = SurfNurbs;
+                const KnotVector u = knot_vector(r), v = knot_vector(r);
+                const bool rat = r.i16() != 0;
+                const std::size_t nu = u.poles(), nv = v.poles();
+                sf.p = {double(u.degree), double(v.degree), double(nu), double(nv), rat ? 1.0 : 0.0};
+                for (const KnotVector* kv : {&u, &v})
+                    for (std::size_t i = 0; i < kv->knots.size(); ++i)
+                        for (int m = 0; m < kv->mults[i]; ++m) sf.p.push_back(kv->knots[i]);
+                vec(int(3 * nu * nv));
+                if (rat) vec(int(nu * nv));
+                break;
+            }
+            default: throw DecodeError(ErrorCode::Unsupported, "surface type " + std::to_string(o.type), o.at);
+        }
+        const auto i = std::uint32_t(out_.surfaces.size());
+        out_.surfaces.push_back(std::move(sf));
+        surface_[id] = i;
+        return i;
+    }
+
+    std::uint32_t pcurve(std::uint32_t id) {
+        if (auto it = pcurve_.find(id); it != pcurve_.end()) return it->second;
+        const Obj& o = obj(id);
+        Ir::PCurve pc;
+        pc.id = id;
+        pc.surface = surface(o.refs.at(0));
+        Rd r = rd(o);
+        switch (o.type) {
+            case 150:
+                pc.kind = PcLine;
+                if (o.p.size == 48) {
+                    for (int i = 0; i < 4; ++i) pc.p.push_back(r.f64());
+                } else if (o.p.size == 64) {
+                    pc.p.push_back(r.f64());
+                    pc.p.push_back(r.f64());
+                    r.f64();
+                    pc.p.push_back(r.f64());
+                    pc.p.push_back(r.f64());
+                } else {
+                    bad("line p-curve payload length", o.at);
+                }
+                break;
+            case 151: {
+                pc.kind = PcCircle;
+                pc.p.push_back(r.f64());
+                pc.p.push_back(r.f64());
+                r.i32();
+                r.i32();
+                const double rad = r.f64();
+                r.f64();
+                r.f64();
+                pc.p.push_back(rad);
+                pc.p.push_back(r.f64());
+                break;
+            }
+            case 160: {
+                pc.kind = PcHermite;
+                const KnotVector kv = knot_vector(r);
+                const auto n = std::size_t(r.i32());
+                if (n != kv.knots.size()) bad("Hermite value count differs from the knot count", r.at + r.k);
+                pc.p.push_back(double(n));
+                pc.p.insert(pc.p.end(), kv.knots.begin(), kv.knots.end());
+                for (std::size_t i = 0; i < 4 * n; ++i) pc.p.push_back(r.f64());
+                const bool has2 = r.i16() != 0;
+                pc.p.push_back(has2 ? 1.0 : 0.0);
+                if (has2) for (std::size_t i = 0; i < 2 * n; ++i) pc.p.push_back(r.f64());
+                break;
+            }
+            default: throw DecodeError(ErrorCode::Unsupported, "p-curve type " + std::to_string(o.type), o.at);
+        }
+        const auto i = std::uint32_t(out_.pcurves.size());
+        out_.pcurves.push_back(std::move(pc));
+        pcurve_[id] = i;
+        return i;
+    }
+
+    // Parameter maps of an edge curve: f[i](q) is the parameter on refs[i] for q on refs[0].
+    std::vector<std::function<double(double)>> edge_maps(const Obj& ec) {
+        Rd r = rd(ec);
+        std::vector<std::function<double(double)>> f{[](double q) { return q; }};
+        const std::uint32_t n = r.count();
+        bool tail = false;
+        for (std::uint32_t j = 0; j < n; ++j) {
+            const int map = r.i16();
+            const double a0 = r.f64(), a1 = r.f64();
+            r.f64();
+            if (map == 0) continue;
+            if (map == 1) { r.f64(); r.f64(); r.f64(); f.push_back([](double q) { return q; }); continue; }
+            const double b0 = r.f64(), b1 = r.f64();
+            if (map == 2) {
+                f.push_back([=](double q) { return a1 != a0 ? b0 + (q - a0) * (b1 - b0) / (a1 - a0) : b0; });
+            } else if (map == 3) {
+                const double s = r.f64(), off = r.f64();
+                f.push_back([=](double q) { return (q - off) / s; });
+            } else if (map == 5) {
+                const std::uint32_t m = r.count();
+                std::vector<double> A(m), B(m);
+                for (auto& x : A) x = r.f64();
+                for (auto& x : B) x = r.f64();
+                f.push_back([A, B](double q) {
+                    std::size_t i = std::size_t(std::upper_bound(A.begin(), A.end(), q) - A.begin());
+                    i = std::min(std::max<std::size_t>(i, 1), A.size() - 1) - 1;
+                    const double h = A[i + 1] - A[i];
+                    return h != 0 ? B[i] + (q - A[i]) / h * (B[i + 1] - B[i]) : B[i];
+                });
+            } else {
+                bad("edge-curve map " + std::to_string(map), r.at + r.k);
+            }
+            tail = true;
+        }
+        if (tail) r.k += 24;
+        if (r.left() != 4) bad("edge-curve payload length", ec.at);
+        if (f.size() != ec.refs.size()) bad("edge-curve maps differ from its curves", ec.at);
+        return f;
+    }
+
+    static bool is_edge_curve(std::uint16_t t) { return t == 191 || t == 192 || t == 193; }
+
+    // Parameter on `target` of the point with parameter q on curve `c`, following edge curves
+    // (which may nest: an edge curve can list another edge curve among its curves).
+    std::optional<double> through(std::uint32_t c, double q, std::uint32_t target, int depth) {
+        if (c == target) return q;
+        const Obj& e = obj(c);
+        if (!is_edge_curve(e.type) || depth > 8) return std::nullopt;
+        const auto maps = edge_maps(e);
+        for (std::size_t j = 0; j < e.refs.size(); ++j)
+            if (auto r = through(e.refs[j], maps[j](q), target, depth + 1)) return r;
+        return std::nullopt;
+    }
+
+    // Parameter of a point (type 14: parameters on several curves) on p-curve `pc`.
+    double point_param(std::uint32_t point, std::uint32_t pc) {
+        const Obj& pt = obj(point);
+        Rd r = rd(pt);
+        const std::uint32_t n = r.count();
+        if (n != pt.refs.size()) bad("point parameter count differs from its curves", pt.at);
+        std::vector<double> q(n);
+        for (std::uint32_t i = 0; i < n; ++i) { q[i] = r.f64(); r.i32(); }
+        if (r.left() != 0) bad("point payload length", pt.at);
+        for (std::uint32_t i = 0; i < n; ++i)
+            if (auto t = through(pt.refs[i], q[i], pc, 0)) return *t;
+        throw DecodeError(ErrorCode::Unsupported, "p-curve " + std::to_string(pc) + " not reachable from point " + std::to_string(point), pt.at);
+    }
+
+    std::uint32_t vertex(std::uint32_t id) {
+        auto [it, fresh] = vertex_.emplace(id, std::uint32_t(vertex_.size()));
+        return it->second;
+    }
+
+    std::uint32_t edge(std::uint32_t id) {
+        if (auto it = edge_.find(id); it != edge_.end()) return it->second;
+        const Obj& e = obj(id);
+        if (e.refs.size() != 5) bad("edge without 5 references", e.at);
+        Ir::Edge ed{vertex(e.refs[1]), vertex(e.refs[2]), id};
+        const auto i = std::uint32_t(out_.edges.size());
+        out_.edges.push_back(ed);
+        edge_[id] = i;
+        return i;
+    }
+
+    // Appends the loop's coedges (throws when the loop cannot be decoded).
+    void loop(std::uint32_t id) {
+        const Obj& l = obj(id);
+        // V5R8 and later end the references with the surface; the oldest releases do not.
+        const bool with_surface = l.refs.size() % 2 == 1;
+        const std::size_t n = l.refs.size() / 2;
+        if (n == 0) bad("loop without coedges", l.at);
+        Rd r = rd(l);
+        if (r.var() != n) bad("loop count differs from its coedges", l.at);
+        const std::size_t flags = 2 * (3 * n + (with_surface ? 4 : 3));
+        // A closing i16 of 3 announces a 73-byte block (not decoded; it holds no topology).
+        const bool block = with_surface && r.left() == flags + 73 && load_u16(r.b.data + r.k + flags - 2, s_.big) == 3;
+        if (r.left() != flags && !block) throw DecodeError(ErrorCode::Unsupported, "loop flag layout of " + std::to_string(r.left()) + " bytes", l.at);
+        r.i16();
+        r.i16();
+        std::vector<Ir::Coedge> ces;
+        for (std::size_t j = 0; j < n; ++j) {
+            r.i16();
+            const int sense = r.i16();
+            r.i16();
+            const std::uint32_t pcid = l.refs[2 * j], eid = l.refs[2 * j + 1];
+            const Obj& e = obj(eid);
+            Ir::Coedge c;
+            c.pcurve = pcurve(pcid);
+            c.edge = edge(eid);
+            c.sense = sense < 0 ? -1 : 1;
+            c.t0 = point_param(e.refs[3], pcid);
+            c.t1 = point_param(e.refs[4], pcid);
+            ces.push_back(c);
+        }
+        out_.loops.push_back({std::uint32_t(out_.coedges.size()), std::uint32_t(n)});
+        out_.coedges.insert(out_.coedges.end(), ces.begin(), ces.end());
+    }
+
+    std::optional<std::uint32_t> face(std::uint32_t id) {
+        if (auto it = face_.find(id); it != face_.end()) return it->second;
+        const auto r = decode_face(id);
+        face_[id] = r;
+        return r;
+    }
+
+    std::optional<std::uint32_t> decode_face(std::uint32_t id) {
+        const Obj& f = obj(id);
+        const auto nc = out_.coedges.size(), nl = out_.loops.size();
+        try {
+            if (f.refs.size() < 2) bad("face without surface and loop", f.at);
+            Rd r = rd(f);
+            Ir::Face fc;
+            fc.id = id;
+            fc.surface = surface(f.refs[0]);
+            fc.sense = r.i16() < 0 ? -1 : 1;
+            fc.first_loop = std::uint32_t(out_.loops.size());
+            for (std::size_t i = 1; i < f.refs.size(); ++i) loop(f.refs[i]);
+            fc.loops = std::uint32_t(out_.loops.size()) - fc.first_loop;
+            out_.faces.push_back(fc);
+            return std::uint32_t(out_.faces.size() - 1);
+        } catch (const DecodeError& e) {
+            out_.coedges.resize(nc);
+            out_.loops.resize(nl);
+            out_.skipped.push_back({id, 512, e.what()});
+            return std::nullopt;
+        }
+    }
+
+    void shell(std::uint32_t id) {
+        const Obj& s = obj(id);
+        Rd r = rd(s);
+        Ir::Shell sh;
+        sh.id = id;
+        try {
+            const std::uint32_t n = r.var();
+            if (n != s.refs.size()) bad("shell count differs from its faces", s.at);
+            r.i16();
+            std::vector<int> senses(n);
+            for (auto& x : senses) x = r.i16();
+            r.i16();
+            if (r.left() != 0) bad("shell payload length", s.at);
+            for (std::uint32_t i = 0; i < n; ++i)
+                if (auto f = face(s.refs[i])) { sh.faces.push_back(*f); sh.senses.push_back(senses[i] < 0 ? -1 : 1); }
+        } catch (const DecodeError& e) {
+            out_.skipped.push_back({id, 520, e.what()});
+            return;
+        }
+        out_.shells.push_back(std::move(sh));
+    }
+};
+
+struct Out {
+    std::vector<std::uint8_t> b;
+    void u32(std::uint32_t v) { for (int i = 0; i < 4; ++i) b.push_back(std::uint8_t(v >> (8 * i))); }
+    void i32(std::int32_t v) { u32(std::uint32_t(v)); }
+    void f64(double d) { std::uint64_t v; std::memcpy(&v, &d, 8); for (int i = 0; i < 8; ++i) b.push_back(std::uint8_t(v >> (8 * i))); }
+};
+
+}  // namespace
+
+Ir decode(const Stream& stream) {
+    if (stream.dialect != Dialect::Varint) throw DecodeError(ErrorCode::Unsupported, std::string("CGM ") + dialect_name(stream.dialect) + " dialect bodies not decoded", 0);
+    return Decoder(stream).run();
+}
+
+std::vector<std::uint8_t> serialize(const Ir& ir) {
+    Out o;
+    const char magic[8] = {'C', 'G', 'M', 'I', 'R', 0, 0, 1};
+    o.b.assign(magic, magic + 8);
+    for (std::size_t n : {ir.surfaces.size(), ir.pcurves.size(), std::size_t(ir.vertices), ir.edges.size(), ir.coedges.size(), ir.loops.size(), ir.faces.size(), ir.shells.size(), ir.skipped.size()}) o.u32(std::uint32_t(n));
+    for (const auto& s : ir.surfaces) { o.u32(s.kind); o.u32(s.id); o.u32(std::uint32_t(s.p.size())); for (double d : s.p) o.f64(d); }
+    for (const auto& c : ir.pcurves) { o.u32(c.kind); o.u32(c.surface); o.u32(c.id); o.u32(std::uint32_t(c.p.size())); for (double d : c.p) o.f64(d); }
+    for (const auto& e : ir.edges) { o.u32(e.v0); o.u32(e.v1); o.u32(e.id); }
+    for (const auto& c : ir.coedges) { o.u32(c.pcurve); o.u32(c.edge); o.i32(c.sense); o.u32(0); o.f64(c.t0); o.f64(c.t1); }
+    for (const auto& l : ir.loops) { o.u32(l.first); o.u32(l.count); }
+    for (const auto& f : ir.faces) { o.u32(f.surface); o.i32(f.sense); o.u32(f.first_loop); o.u32(f.loops); o.u32(f.id); }
+    for (const auto& s : ir.shells) { o.u32(s.id); o.u32(std::uint32_t(s.faces.size())); for (std::size_t i = 0; i < s.faces.size(); ++i) { o.u32(s.faces[i]); o.i32(s.senses[i]); } }
+    for (const auto& k : ir.skipped) { o.u32(k.id); o.u32(k.type); o.u32(std::uint32_t(k.why.size())); o.b.insert(o.b.end(), k.why.begin(), k.why.end()); }
+    return o.b;
+}
+
+}  // namespace cadcore::formats::catia::cgm

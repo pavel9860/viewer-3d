@@ -28,6 +28,7 @@
 #include "cadcore/compare.hpp"
 #include "cadcore/decode.hpp"
 #include "cadcore/stats.hpp"
+#include "formats/catia/cgm_model.hpp"
 #include "formats/catia/osm.hpp"
 #include "formats/catia/spec.hpp"
 #include "formats/catia/store.hpp"
@@ -696,6 +697,42 @@ static int cmd_streams(int argc, char** argv) {
     return 0;
 }
 
+// cgm FILE [OUT.cgmir]: the CGMGeom stream's dialect, records, decoded B-rep and left-out faces;
+// writes the flat IR when OUT is given.
+static int cmd_cgm(int argc, char** argv) {
+    if (argc < 3) return 2;
+    auto bytes = read_file(argv[2]);
+    namespace cgm = formats::catia::cgm;
+    try {
+        const auto st = cgm::find_stream(ByteView(bytes.data(), bytes.size()));
+        if (!st) { std::printf("{\"file\":\"%s\",\"cgm\":false}\n", argv[2]); return 0; }
+        const cgm::Stream s = cgm::frame(ByteView(st->data(), st->size()));
+        const cgm::Ir ir = cgm::decode(s);
+        std::size_t want = 0;
+        for (const auto& r : s.records) want += r.type == 512;
+        std::printf("{\"file\":\"%s\",\"dialect\":\"%s\",\"version\":\"%s\",\"records\":%zu,\"faces\":%zu,\"faces_decoded\":%zu,\"shells\":%zu,\"surfaces\":%zu,\"pcurves\":%zu,\"edges\":%zu,\"skipped\":[",
+                    argv[2], cgm::dialect_name(s.dialect), s.version.c_str(), s.records.size(), want, ir.faces.size(), ir.shells.size(), ir.surfaces.size(), ir.pcurves.size(), ir.edges.size());
+        for (std::size_t i = 0; i < ir.skipped.size(); ++i) {
+            std::string why = ir.skipped[i].why;
+            for (char& c : why) if (c == '"' || c == '\\') c = '\'';
+            std::printf("%s{\"id\":%u,\"type\":%u,\"why\":\"%s\"}", i ? "," : "", ir.skipped[i].id, ir.skipped[i].type, why.c_str());
+        }
+        std::printf("]}\n");
+        if (argc > 3) {
+            const auto b = cgm::serialize(ir);
+            FILE* f = std::fopen(argv[3], "wb");
+            if (!f || std::fwrite(b.data(), 1, b.size(), f) != b.size()) { std::fprintf(stderr, "cannot write %s\n", argv[3]); if (f) std::fclose(f); return 1; }
+            std::fclose(f);
+        }
+    } catch (const std::exception& e) {
+        std::string why = e.what();
+        for (char& c : why) if (c == '"' || c == '\\') c = '\'';
+        std::printf("{\"file\":\"%s\",\"error\":\"%s\"}\n", argv[2], why.c_str());
+        return 1;
+    }
+    return 0;
+}
+
 static int cmd_objects(int argc, char** argv) {
     if (argc < 3) return 2;
     auto bytes = read_file(argv[2]);
@@ -758,6 +795,7 @@ int main(int argc, char** argv) {
     if (cmd == "tree") return cmd_tree(argc, argv);
     if (cmd == "objects") return cmd_objects(argc, argv);
     if (cmd == "streams") return cmd_streams(argc, argv);
-    std::fprintf(stderr, "usage: cadcli info FILE... | gen OUT_DIR | corpus DIR... | bench FILE [N] | compare A B TOL | triangles FILE | ply FILE OUT | svg FILE OUT [PX] | benchsuite DIR... [--write F] [--check F] | tree FILE | objects CATIA_FILE [CLASS] | streams CATIA_FILE\n");
+    if (cmd == "cgm") return cmd_cgm(argc, argv);
+    std::fprintf(stderr, "usage: cadcli info FILE... | gen OUT_DIR | corpus DIR... | bench FILE [N] | compare A B TOL | triangles FILE | ply FILE OUT | svg FILE OUT [PX] | benchsuite DIR... [--write F] [--check F] | tree FILE | objects CATIA_FILE [CLASS] | streams CATIA_FILE | cgm CATPART [OUT.cgmir]\n");
     return 2;
 }

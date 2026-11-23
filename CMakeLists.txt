@@ -46,6 +46,8 @@ add_library(cadcore STATIC
   src/formats/catia/document.cpp
   src/formats/catia/tessellation.cpp
   src/formats/catia/store.cpp
+  src/formats/catia/cgm.cpp
+  src/formats/catia/cgm_model.cpp
   src/formats/drc.cpp
   src/formats/dxf.cpp
   src/formats/dxf/groups.cpp
