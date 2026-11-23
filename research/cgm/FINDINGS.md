@@ -14,3 +14,20 @@ P-curves: 150 line (o2,d2,t0,t1; old form 8 doubles), 151 circle (c2, 2×i32, r,
 Edge curve 192 payload: varint n, i16 flags, [t0,t1,tol], per extra pcurve: flag1 identity [b0,b1,tol], flag2 linear [b0,b1,s,off] (t0=s·t1+off), flag4 table [b0,b1, N, N params, N params]; then [c0,c1,tol]+4 bytes — parser still fails on many (ecfail).
 B-rep-only parts: 319 (cadcli): 227 varint, 56 compact, 30 fixed, 6 no CGM stream.
 Next: finish 192/193 grammar, remaining surfaces/pcurves, then C++ module + cadcli + kernel import.
+
+## Status 2026-11-23 (second pass)
+Implemented: cadcore `src/formats/catia/cgm.{hpp,cpp}` (location, framing varint+compact),
+`cgm_model.{hpp,cpp}` (varint-dialect decode to the flat IR; grammar in its header), `cadcli cgm`;
+kernel `brep/src/cgm.rs`, `cgm_mesh.rs`, bin `cgm`. Check: `research/cgm/compare_tess.py`.
+Facts established (corpus-verified):
+- Edge-curve maps (191/192/193): all 71,407 parse exactly; maps nest.
+- Cylinder/sphere/torus/circle parameters are arc lengths; the trailing "offset" double is only a
+  reference parameter (0 mismatches over all old-dialect vertices).
+- 160 = C2 quintic Hermite p-curve; 231 = NURBS surface; 212/241 resolve to their carrier.
+- Loop: senses at i16 index 3+3j; the stored senses chain up to one global sign per loop.
+- Orientation: outward normal = -(shell sense) * (Su x Sv); the face record's i16 does not enter.
+Results vs CATIA's stored tessellation (old dialect, parts with all faces decoded): 150/192 closed
+and within 1% volume, 16 more within 5%.
+Open: which body CATIA shows (needs the feature tree -> CGM body link; header roots only partly
+identify it); surfaces 202, 210, 211, 214, 216 (fillet), 242, 244; p-curves 152, 155, 170;
+compact dialect bodies (56 B-rep-only parts); fixed dialect framing (30); sheet-only parts.

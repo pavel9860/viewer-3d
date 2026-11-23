@@ -5,6 +5,7 @@
 #include <functional>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "cadcore/error.hpp"
 
@@ -78,6 +79,21 @@ public:
     }
 
     Ir run() {
+        // shells of volumes (525 -> 513 -> 520) bound solids; other shells are sheets
+        for (const Record& rec : s_.records)
+            if (rec.type == 513)
+                for (std::uint32_t r : obj(rec.id).refs) solid_.insert(r);
+        // owning body (500) of each shell: 500 -> 520, or 500 -> 525 -> 513 -> 520
+        std::unordered_map<std::uint32_t, std::uint32_t> up;
+        for (const Record& rec : s_.records)
+            if (rec.type == 500 || rec.type == 525 || rec.type == 513)
+                for (std::uint32_t r : obj(rec.id).refs) up.emplace(r, rec.id);
+        for (const Record& rec : s_.records)
+            if (rec.type == 520) {
+                std::uint32_t x = rec.id;
+                for (int d = 0; d < 4 && up.count(x); ++d) x = up[x];
+                if (x != rec.id && obj(x).type == 500) body_[rec.id] = x;
+            }
         for (const Record& rec : s_.records)
             if (rec.type == 520) shell(rec.id);
         out_.vertices = std::uint32_t(vertex_.size());
@@ -89,6 +105,8 @@ private:
     std::unordered_map<std::uint32_t, Obj> objs_;
     std::unordered_map<std::uint32_t, std::uint32_t> surface_, pcurve_, edge_, vertex_;
     std::unordered_map<std::uint32_t, std::optional<std::uint32_t>> face_;
+    std::unordered_set<std::uint32_t> solid_;
+    std::unordered_map<std::uint32_t, std::uint32_t> body_;
     Ir out_;
 
     const Obj& obj(std::uint32_t id) const {
@@ -367,6 +385,9 @@ private:
         Rd r = rd(s);
         Ir::Shell sh;
         sh.id = id;
+        sh.solid = solid_.count(id) != 0;
+        if (auto it = body_.find(id); it != body_.end()) sh.body = it->second;
+        sh.root = std::find(s_.roots.begin(), s_.roots.end(), sh.body) != s_.roots.end();
         try {
             const std::uint32_t n = r.var();
             if (n != s.refs.size()) bad("shell count differs from its faces", s.at);
@@ -410,7 +431,7 @@ std::vector<std::uint8_t> serialize(const Ir& ir) {
     for (const auto& c : ir.coedges) { o.u32(c.pcurve); o.u32(c.edge); o.i32(c.sense); o.u32(0); o.f64(c.t0); o.f64(c.t1); }
     for (const auto& l : ir.loops) { o.u32(l.first); o.u32(l.count); }
     for (const auto& f : ir.faces) { o.u32(f.surface); o.i32(f.sense); o.u32(f.first_loop); o.u32(f.loops); o.u32(f.id); }
-    for (const auto& s : ir.shells) { o.u32(s.id); o.u32(std::uint32_t(s.faces.size())); for (std::size_t i = 0; i < s.faces.size(); ++i) { o.u32(s.faces[i]); o.i32(s.senses[i]); } }
+    for (const auto& s : ir.shells) { o.u32(s.id); o.u32(s.body); o.u32((s.solid ? 1u : 0u) | (s.root ? 2u : 0u)); o.u32(std::uint32_t(s.faces.size())); for (std::size_t i = 0; i < s.faces.size(); ++i) { o.u32(s.faces[i]); o.i32(s.senses[i]); } }
     for (const auto& k : ir.skipped) { o.u32(k.id); o.u32(k.type); o.u32(std::uint32_t(k.why.size())); o.b.insert(o.b.end(), k.why.begin(), k.why.end()); }
     return o.b;
 }

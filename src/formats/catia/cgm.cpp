@@ -139,6 +139,14 @@ Stream frame(ByteView s) {
         return out;
     }
     if (vv != ByteView::npos) {
+        std::size_t k = from;
+        if (k + 2 <= vv && s[k] == 3 && s[k + 1] == 0) k += 2;
+        varint(s, k);
+        if (k < vv && s[k] != 0x17) {
+            const std::uint32_t n = varint(s, k);
+            for (std::uint32_t i = 0; i < n && k < vv; ++i) out.roots.push_back(varint(s, k));
+        }
+        if (k >= vv || s[k] != 0x17) out.roots.clear();  // not the documented header form
         frame_varint(s, vv, out.big, out);
         return out;
     }

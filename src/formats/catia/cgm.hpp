@@ -6,7 +6,8 @@
 //
 // Stream header: u8 order (01 little-endian, 00 big-endian), u32 length of the rest, then one or two
 // u32-length-prefixed version strings ("  V5R12-HCN:052003", "2015Fall@Prototype", ...), then
-// root object ids and a record directory. Four record dialects occur (corpus counts in
+// root object ids and a record directory. Varint dialect: [i16 3] varint, [varint n, n root ids],
+// 17 xx (no root list when 17 follows the first varint). Four record dialects occur (corpus counts in
 // research/cgm/FINDINGS.md):
 //
 //   varint  (V5R8..V5R19, CXR6/7): directory  e5 0d 06 01 00 u32 level u32 size, then records
@@ -49,6 +50,7 @@ struct Stream {
     bool big = false;            // byte order of fixed-width fields
     std::string version;         // first version string of the header
     std::uint32_t level = 0;     // directory level
+    std::vector<std::uint32_t> roots;  // varint dialect: root object ids named by the header
     std::vector<Record> records;
     std::size_t end = 0;         // first byte after the records (start of the trailer)
 };
