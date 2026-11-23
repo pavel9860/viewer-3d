@@ -225,6 +225,7 @@ void property_tables(Cur& c, Names& name) {
                 case 2:
                 case 3:
                 case 5: c.compact(); break;  // 5: AsmVisuAttr* in Gardena (R12, 37 values; 80 ffffffff = -1)
+                case 11: name(c); break;     // a name: InSceneActivated = 'Default' (CAAPspEduIn)
                 case 0:
                 case 14: break;
                 case 13: {
@@ -261,6 +262,14 @@ Stream container(ByteView v, std::size_t base, bool big, std::shared_ptr<const s
     const Layout layout(s.spec_version);
     if (osmb)
         while (c.peek() != 0xfe) name(c);
+    // OSMN: an optional document link table before fe: 82 <n> (<link blob> <link blob>)*n
+    // (4 plant-design products, n = 5 and 9; other first values are not established).
+    if (osmn && c.peek() != 0xfe) {
+        if (c.compact() != 1) bad("container header: unknown link table form", c.base + c.k - 1);
+        const std::uint64_t n = c.compact();
+        if (n > c.v.size) bad("container header: link table count exceeds the container", c.base + c.k);
+        for (std::uint64_t i = 0; i < 2 * n; ++i) c.blob();
+    }
     if (osmb || osmn || layout.header_fe) c.expect(0xfe, "container header end");
     const std::uint64_t highest = c.compact();
     // The grammar position, for errors: phase, object number (1-based), byte where it starts.
