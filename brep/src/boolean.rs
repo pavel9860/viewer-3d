@@ -163,11 +163,6 @@ fn pair_pieces(w: &Body, trims: &[Trim], weld: f64, fa: Id<Face>, fb: Id<Face>) 
     let curves = intersect(&wa, &wb).0;
     if std::env::var("BREP_TIME").is_ok() && t0.elapsed().as_secs_f64() > 0.5 { eprintln!("  ssi {:.1} s, {} curves", t0.elapsed().as_secs_f64(), curves.len()); }
     let out = restrict(w, trims, weld, fa, fb, curves);
-    if std::env::var("BREP_WIN").is_ok() {
-        let full = restrict(w, trims, weld, fa, fb, intersect(sa, sb).0);
-        let len = |ps: &[Piece]| ps.iter().map(|p| p.pts.windows(2).map(|q| norm(sub(q[1], q[0]))).sum::<f64>()).sum::<f64>();
-        if (len(&full) - len(&out)).abs() > 1e-6 { eprintln!("WIN faces src {} x {}: window {:?} pieces {} len {:.5} | full pieces {} len {:.5}", w.faces.get(fa).origin.src, w.faces.get(fb).origin.src, wa.dom(), out.len(), len(&out), full.len(), len(&full)); }
-    }
     out
 }
 
@@ -205,7 +200,13 @@ fn restrict(w: &Body, trims: &[Trim], weld: f64, fa: Id<Face>, fb: Id<Face>, cur
             if !seg_in[k] { k += 1; continue; }
             let k0 = k;
             while k < seg_in.len() && seg_in[k] { k += 1; }
-            out.push(Piece { f: [fa, fb], pts: pts[k0..=k].to_vec(), ev: ev[k0..=k].to_vec(), closed: false });
+            // a run end without an event, within the weld tolerance (along the curve) of an event: the tail past the
+            // boundary is below model resolution; the run ends at the event
+            let (mut i0, mut i1) = (k0, k);
+            let arc = |a: usize, b: usize| pts[a..=b].windows(2).map(|q| norm(sub(q[1], q[0]))).sum::<f64>();
+            if ev[i0].is_empty() { if let Some(j) = (i0 + 1..i1).find(|&j| !ev[j].is_empty()) { if arc(i0, j) <= weld { i0 = j; } } }
+            if ev[i1].is_empty() { if let Some(j) = (i0 + 1..i1).rev().find(|&j| !ev[j].is_empty()) { if arc(j, i1) <= weld { i1 = j; } } }
+            out.push(Piece { f: [fa, fb], pts: pts[i0..=i1].to_vec(), ev: ev[i0..=i1].to_vec(), closed: false });
         }
     }
     out
@@ -273,6 +274,17 @@ fn arrange(w: &Body, s: &dyn Surf, tr: &Trim, cuts: &[Id<Edge>]) -> (Vec<Region>
     let ang: Vec<f64> = (0..nh).map(angle).collect();
     for l in out.iter_mut() { l.sort_by(|&a, &b| ang[a].total_cmp(&ang[b])); }
     let dangling = out.iter().filter(|l| l.len() == 1).count();
+    if dangling > 0 && std::env::var("BREP_DEBUG").is_ok() {
+        for (n, l) in out.iter().enumerate().filter(|(_, l)| l.len() == 1).take(6) {
+            let h = l[0];
+            let same_v: Vec<(usize, P2)> = nodes.iter().enumerate().filter(|(_, x)| x.0 == nodes[n].0).map(|(i, x)| (i, x.1)).collect();
+            let q = nodes[n].1;
+            let near = items.iter().enumerate().filter(|(i, _)| *i != h / 2).map(|(i, it)| (it.1.windows(2).map(|w| crate::trim::pt_seg(q, w[0], w[1])).fold(f64::MAX, f64::min), i)).min_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
+            let it = &items[near.1];
+            eprintln!("     nearest other item edge {:?} at uv dist {:.2e}, its ends {:?} {:?} vertices {:?}", it.0, near.0, it.1[0], it.1[it.1.len() - 1], it.3);
+            eprintln!("   dangling node {n} vertex {:?} uv {:?} item edge {:?} ({} pts, len uv {:.2e}) nodes of same vertex {same_v:?}", nodes[n].0, nodes[n].1, items[h / 2].0, items[h / 2].1.len(), { let p = &items[h / 2].1; p.windows(2).map(|q| (q[1][0] - q[0][0]).hypot(q[1][1] - q[0][1])).sum::<f64>() });
+        }
+    }
     let mut pos = vec![0usize; nh];
     for l in &out { for (k, &h) in l.iter().enumerate() { pos[h] = k; } }
     let next = |h: usize| { let l = &out[to(h)]; l[(pos[h ^ 1] + l.len() - 1) % l.len()] };
@@ -373,7 +385,7 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
         r
     }).into_iter().flatten().collect();
     st.pieces = pieces.len();
-    lap("face-pair intersections");
+    lap(&format!("face-pair intersections (tol {:.1e}, weld {weld_tol:.1e})", w.tol));
 
     // vertices: every event point welded (existing vertices first), piece ends without events become vertices
     let mut weld = Weld { tol: weld_tol, grid: HashMap::new() };
@@ -401,6 +413,14 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
         }
         if pc.closed { pv[n - 1] = pv[0]; }
         pverts.push(pv);
+    }
+    // debug: BREP_V=<vertex id> prints the edges and pieces meeting at that vertex
+    if let Ok(v) = std::env::var("BREP_V") {
+        let v: u32 = v.parse().unwrap();
+        let mut ef: HashMap<Id<Edge>, Vec<u32>> = HashMap::new();
+        for &f in &faces { for &l in &w.faces.get(f).loops { for &c in &w.loops.get(l).coedges { ef.entry(w.coedges.get(c).edge).or_default().push(w.faces.get(f).origin.src); } } }
+        for (e, sp) in &splits { if sp.iter().any(|x| x.1 .0 == v) { eprintln!("vertex {v}: on edge {e:?} (STEP #{}) of faces STEP {:?}", w.edges.get(*e).origin.src, ef.get(e)); } }
+        for (pc, pv) in pieces.iter().zip(&pverts) { if pv.iter().any(|x| x.map_or(false, |x| x.0 == v)) { eprintln!("vertex {v}: piece of faces STEP {} x {} ({} pts) vertices {:?} len {:.3e}", w.faces.get(pc.f[0]).origin.src, w.faces.get(pc.f[1]).origin.src, pc.pts.len(), pv.iter().flatten().collect::<Vec<_>>(), pc.pts.windows(2).map(|q| norm(sub(q[1], q[0]))).sum::<f64>()); } }
     }
     // split edges at their event vertices
     let mut split: HashMap<Id<Edge>, Vec<Id<Edge>>> = HashMap::new();
@@ -437,8 +457,17 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
             let mid = p[p.len() / 2];
             let same = by_ends.get(&key(va, vb)).into_iter().flatten().copied().find(|&e| {
                 let ed = w.edges.get(e);
-                ed.curve.as_deref().map_or(false, |c| { let t = t_of(c, mid); on_edge(ed, c, t).is_some() && norm(sub(c.ev(t).0, mid)) < 10.0 * SSI_SAG })
+                ed.curve.as_deref().map_or(false, |c| { let t = t_of(c, mid); on_edge(ed, c, t).is_some() && norm(sub(c.ev(t).0, mid)) < weld_tol.max(4.0 * SSI_SAG) })
             });
+            // an identified edge serves these faces too: its tolerance covers their surfaces (tolerant modelling)
+            if let Some(e) = same {
+                let ed = w.edges.get(e);
+                let c = ed.curve.clone().unwrap();
+                let dev = tess(c.as_ref(), ed.t[0], ed.t[1], SAG).into_iter().map(|t| c.ev(t).0)
+                    .map(|q| pc.f.iter().map(|&f| dist(w.faces.get(f).surface.as_ref(), q)).fold(0.0, f64::max)).fold(0.0, f64::max);
+                let tol = &mut w.edges.get_mut(e).tol;
+                *tol = tol.max(2.0 * dev);
+            }
             let e = same.unwrap_or_else(|| {
                 let (sa, sb) = (w.faces.get(pc.f[0]).surface.clone(), w.faces.get(pc.f[1]).surface.clone());
                 let dev = p.windows(2).flat_map(|q| [q[0], mulv(addv(q[0], q[1]), 0.5)]).map(|q| dist(sa.as_ref(), q).max(dist(sb.as_ref(), q))).fold(0.0, f64::max);

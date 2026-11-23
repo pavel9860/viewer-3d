@@ -67,7 +67,8 @@ enum Sing { Isolated, Tangential(V), Branch(V, V), Degenerate }
 pub struct Curve { pub pts: Vec<V>, pub ends: (End, End), pub kind: Kind }
 
 /// tol: distance tolerance (model units); ang: sine of the normal angle below which surfaces count as tangent
-struct Ctx<'a> { a: &'a dyn Surf, b: &'a dyn Surf, tol: f64, ang: f64, reg: std::cell::RefCell<Vec<[f64; 4]>> }
+/// sag: chordal tolerance of the traced polylines
+struct Ctx<'a> { a: &'a dyn Surf, b: &'a dyn Surf, tol: f64, ang: f64, sag: f64, reg: std::cell::RefCell<Vec<[f64; 4]>> }
 
 fn ls2(su: V, sv: V, d: V) -> (f64, f64) {
     let (p, q, r) = (dot(su, su), dot(su, sv), dot(sv, sv));
@@ -262,7 +263,7 @@ impl Ctx<'_> {
                 let kappa = turn / used.max(1e-300);
                 tp = t;
                 h = (h * 1.5).min(0.1);
-                if kappa > 0.0 { h = h.min((8.0 * SAG / kappa).sqrt()); } // chordal deviation <= SAG
+                if kappa > 0.0 { h = h.min((8.0 * self.sag / kappa).sqrt()); } // chordal deviation <= sag
                 // predicted distance to a zero of sin(normal angle): never step over a singular point
                 if s_new < s_prev { let reach = s_new * used / (s_prev - s_new); h = h.min((0.5 * reach).max(1e-5)); }
                 s_prev = s_new;
@@ -324,7 +325,7 @@ impl Ctx<'_> {
             x = nx;
             t = nd;
             h = (h * 1.5).min(0.1);
-            if kappa > 0.0 { h = h.min((8.0 * SAG / kappa).sqrt()); }
+            if kappa > 0.0 { h = h.min((8.0 * self.sag / kappa).sqrt()); }
             h = h.max(1e-5);
             if self.sin_n(&x) > 2.0 * self.ang.max(5e-5) { return (pts, End::Tangent); } // left the contact
         }
@@ -337,7 +338,11 @@ pub fn intersect(a: &dyn Surf, b: &dyn Surf) -> (Vec<Curve>, usize) { intersect_
 /// Intersection curves of two bounded surfaces. Tolerant mode (`ang` > 1e-6): contacts within `tol`
 /// (distance) and `ang` (sine of the normal angle) count as tangential.
 pub fn intersect_tol(a: &dyn Surf, b: &dyn Surf, tol: f64, ang: f64) -> (Vec<Curve>, usize) {
-    let c = Ctx { a, b, tol, ang, reg: Default::default() };
+    intersect_sag(a, b, tol, ang, SAG)
+}
+/// `intersect_tol` with traced polylines within `sag` of the curves (model-dependent accuracy)
+pub fn intersect_sag(a: &dyn Surf, b: &dyn Surf, tol: f64, ang: f64, sag: f64) -> (Vec<Curve>, usize) {
+    let c = Ctx { a, b, tol, ang, sag, reg: Default::default() };
     let n = 24;
     let samp = |s: &dyn Surf| -> Vec<(f64, f64, V)> {
         let d = s.dom();
@@ -363,7 +368,7 @@ pub fn intersect_tol(a: &dyn Surf, b: &dyn Surf, tol: f64, ang: f64) -> (Vec<Cur
     let mut branches: Vec<[f64; 4]> = vec![];
     let covered = |curves: &Vec<Curve>, p: V, tol: f64| curves.iter().any(|cv| {
         if cv.pts.len() == 1 { return norm(sub(cv.pts[0], p)) < tol; }
-        cv.pts.windows(2).any(|w| { let ab = sub(w[1], w[0]); let t = (dot(sub(p, w[0]), ab) / dot(ab, ab).max(1e-300)).clamp(0.0, 1.0); norm(sub(p, addv(w[0], mulv(ab, t)))) < tol + 4.0 * SAG })
+        cv.pts.windows(2).any(|w| { let ab = sub(w[1], w[0]); let t = (dot(sub(p, w[0]), ab) / dot(ab, ab).max(1e-300)).clamp(0.0, 1.0); norm(sub(p, addv(w[0], mulv(ab, t)))) < tol + 4.0 * c.sag })
     });
     let r3 = |x: &[f64; 4], f: &mut [f64]| { let (pa, pb) = (a.ev(x[0], x[1]).p, b.ev(x[2], x[3]).p); f[..3].copy_from_slice(&sub(pa, pb)); };
     let trace_from = |s: [f64; 4], curves: &mut Vec<Curve>, branches: &mut Vec<[f64; 4]>| {
