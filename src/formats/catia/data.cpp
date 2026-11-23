@@ -63,4 +63,14 @@ std::optional<DataStream> read_data_stream(ByteView file) {
     return out;
 }
 
+bool is_part_document(ByteView file) {
+    try {
+        if (const auto d = read_data_stream(file))
+            for (const DataSection& s : d->sections)
+                if (s.cls == "CATPrtCont") return true;
+    } catch (const DecodeError&) {
+    }
+    return false;
+}
+
 }  // namespace cadcore::formats::catia

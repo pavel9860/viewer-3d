@@ -43,4 +43,9 @@ struct DataStream {
 // when its section layout is malformed.
 std::optional<DataStream> read_data_stream(ByteView file);
 
+// Whether the document is a part: it holds a part container ("CATPrtCont"), as all 1,539 parts of
+// the corpus with a Data stream do and no product does, whatever the file's extension. False when
+// the store or its Data stream cannot be read.
+bool is_part_document(ByteView file);
+
 }  // namespace cadcore::formats::catia

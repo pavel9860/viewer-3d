@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "core/parallel.hpp"
+#include "formats/catia/data.hpp"
 #include "formats/registry.hpp"
 
 namespace cadcore::formats {
@@ -33,9 +34,9 @@ constexpr std::uint32_t kMaxElements = 50'000'000;
 constexpr std::uint32_t kMaxRefs = 50'000'000;
 
 int sniff(ByteView d, std::string_view ext) {
-    if (d.size >= 8 && std::memcmp(d.data, kMagic, 8) == 0 && (ext == "catpart" || ext.empty())) return 2;
-    if (d.size >= 8 && std::memcmp(d.data, kMagic, 8) == 0) return ext == "catpart" ? 2 : 1;
-    return 0;
+    if (d.size < 8 || std::memcmp(d.data, kMagic, 8) != 0) return 0;
+    if (ext == "catpart" || ext.empty()) return 2;
+    return formats::catia::is_part_document(d) ? 3 : 1;  // a part saved under another extension
 }
 
 // --- low level --------------------------------------------------------------------------------
