@@ -87,14 +87,18 @@ pub fn orientation_fix(m: &Mesh) -> Option<Vec<bool>> {
 /// edge samples: parameters as fractions of the first coedge's range, and mesh point indices
 struct EdgeSamples { f: Vec<f64>, idx: Vec<u32> }
 
-/// meshes the faces of the solids, and of the sheets too when `sheets`
+/// meshes the faces of the solids, and of the sheets too when `sheets`. When a body named by the
+/// stream's roots has a solid, only root bodies are meshed (the modeler also keeps intermediate
+/// results); otherwise every solid is. Which body the part shows is decided by its feature tree,
+/// not read yet, so parts keeping several solids without a root among them mesh all of them.
 pub fn tessellate(m: &Model, sag: f64, sheets: bool) -> Mesh {
+    let any_root = m.shells.iter().any(|s| s.root && s.solid);
     let mut out = Mesh { p: vec![], tris: vec![], tri_face: vec![], faces: vec![], failed: vec![] };
     let mut vtx: Vec<Option<u32>> = vec![None; m.vertices];
     let mut edges: HashMap<usize, EdgeSamples> = HashMap::new();
     // faces of the shells, each once
     let mut seen = vec![false; m.faces.len()];
-    let faces: Vec<(usize, i32)> = m.shells.iter().filter(|s| s.solid || sheets).flat_map(|s| s.faces.iter().copied()).filter(|&(f, _)| !std::mem::replace(&mut seen[f], true)).collect();
+    let faces: Vec<(usize, i32)> = m.shells.iter().filter(|s| (s.solid || sheets) && (s.root || !any_root)).flat_map(|s| s.faces.iter().copied()).filter(|&(f, _)| !std::mem::replace(&mut seen[f], true)).collect();
     let coedges: Vec<usize> = faces.iter().flat_map(|&(f, _)| m.faces[f].loops.iter().flat_map(|l| l.clone())).collect();
     for c in coedges {
         let ce = &m.coedges[c];

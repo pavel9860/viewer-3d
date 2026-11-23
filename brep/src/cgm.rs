@@ -97,8 +97,8 @@ impl Surf for CgmTorus {
 
 pub struct Coedge { pub pcurve: usize, pub edge: usize, pub sense: i32, pub t: [f64; 2] }
 pub struct Face { pub surface: usize, pub sense: i32, pub loops: Vec<std::ops::Range<usize>>, pub id: u32 }
-/// `body`: the owning CGM body record (0 if none); `solid`: bounds a volume; otherwise a sheet (open surfaces, reference planes)
-pub struct Shell { pub id: u32, pub body: u32, pub solid: bool, pub faces: Vec<(usize, i32)> }
+/// `body`: the owning CGM body record (0 if none); `solid`: bounds a volume; `root`: its body is a root of the stream; otherwise a sheet (open surfaces, reference planes)
+pub struct Shell { pub id: u32, pub body: u32, pub solid: bool, pub root: bool, pub faces: Vec<(usize, i32)> }
 pub struct Skip { pub id: u32, pub kind: u32, pub why: String }
 
 /// the B-rep of one part
@@ -202,9 +202,10 @@ impl Model {
             m.faces.push(Face { surface: s, sense, loops: loops[l0..l0 + nl].to_vec(), id });
         }
         for _ in 0..c[7] {
-            let (id, body, solid, n) = (r.u32()?, r.u32()?, r.u32()? != 0, r.n()?);
+            let (id, body, flags, n) = (r.u32()?, r.u32()?, r.u32()?, r.n()?);
+            let (solid, root) = (flags & 1 != 0, flags & 2 != 0);
             let faces = (0..n).map(|_| { let (f, s) = (r.n()?, r.i32()?); if f >= m.faces.len() { Err("shell face out of range".to_string()) } else { Ok((f, s)) } }).collect::<Result<_, _>>()?;
-            m.shells.push(Shell { id, body, solid, faces });
+            m.shells.push(Shell { id, body, solid, root, faces });
         }
         for _ in 0..c[8] { let (id, kind, n) = (r.u32()?, r.u32()?, r.n()?); let why = String::from_utf8_lossy(r.take(n)?).into_owned(); m.skipped.push(Skip { id, kind, why }); }
         if r.k != b.len() { return Err(format!("{} bytes after the IR", b.len() - r.k)); }
