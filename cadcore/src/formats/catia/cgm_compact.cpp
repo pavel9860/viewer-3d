@@ -84,6 +84,7 @@ double load_f64_le(const std::uint8_t* p) { double d; std::memcpy(&d, p, 8); ret
 // form: i32 degree, 0, x, n, 0, knots, i32 multiplicities. Returns the number of poles.
 // Values a 2012+ record may take from others: surface parameter boxes, p-curve and edge-curve ranges.
 struct Ctx {
+    std::unordered_map<std::uint32_t, int> edge_uses;  // edge curve -> edges referencing it
     std::unordered_map<std::uint32_t, std::uint16_t> type;
     std::unordered_map<std::uint32_t, std::array<double, 4>> box;   // u0 u1 v0 v1
     std::unordered_map<std::uint32_t, std::array<double, 2>> range;  // p-curves, edge curves
@@ -232,7 +233,14 @@ void edge_curve_derived(In& in, Out& o, const std::vector<std::uint32_t>& refs, 
     // the first curve's own range
     auto it = cx.range.find(refs.at(0));
     const bool infinite = std::abs(f0) >= 1e6 || std::abs(f1) >= 1e6;
-    cx.range[self] = infinite && it != cx.range.end() ? it->second : std::array<double, 2>{f0, f1};
+    // an edge curve of one edge whose range is wider than its first curve's (a full circle period
+    // around a half): the edge spans the first curve's range
+    bool wider = false;
+    if (it != cx.range.end()) {
+        auto u = cx.edge_uses.find(self);
+        wider = u != cx.edge_uses.end() && u->second == 1 && std::abs(f1 - f0) > std::abs(it->second[1] - it->second[0]) + 1e-9;
+    }
+    cx.range[self] = (infinite || wider) && it != cx.range.end() ? it->second : std::array<double, 2>{f0, f1};
 }
 
 }  // namespace
@@ -535,6 +543,11 @@ std::vector<CanonicalRecord> canonical_records(const Stream& s, const CompactLay
     std::vector<CanonicalRecord> out(s.records.size());
     Ctx cx;
     for (const Record& r : s.records) cx.type[r.id] = r.type;
+    if (L.derived)
+        for (const Record& r : s.records) {
+            if (r.type != 511 || r.body.size == 0) continue;
+            try { In in{r.body, r.id, true, r.offset}; ++cx.edge_uses[in.ref()]; } catch (const DecodeError&) {}
+        }
     auto pass = [](std::uint16_t t) {
         if ((t >= 200 && t < 300) || t == 10 || t == 12 || t == 100) return 0;  // surfaces, points in space
         if (t >= 150 && t < 191) return 1;                                     // p-curves
