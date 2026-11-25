@@ -1,0 +1,42 @@
+# kernel
+
+A browser-first B-rep kernel and its research spikes (Rust, WASM). Separate from the format decoders (`../cadcore`, `../catia`).
+
+```
+brep/         kernel core: geom (Surf trait, analytic surfaces), nurbs (B-spline, extrusion, revolution), p21, topo (chunked COW arena, typed ids, provenance, tolerances),
+              step (STEP -> Body import), check (topology + geometry validator), ssi, exact (predicates), trim (faces in UV),
+              make (primitives), mesh (UV triangulation, volume), classify (point in body), boolean (union/intersection/difference on Body);
+              `brep check|bool FILE|LIST`
+kcore/        no_std shared math (PRNG, hash, own sin/sqrt, synthetic + real mesh workloads); native and wasm32
+spike/src/
+  ssi_cases.rs  hand-made hard cases + randomized analytic stress test
+  pred.rs       exact predicate benchmark
+  boolean.rs    boolean spike: shared edges, vertex registry, UV arrangement, classification, closure + volume
+  p21.rs        minimal STEP Part 21 parser
+  step.rs       edge check against CATIA STEP exports (local or full SSI)
+  bench.rs      determinism, transfer, incremental recompute, hashing, naming, assembly instancing
+  real.rs       real CATIA mesh workloads (per-part processing, hashing, assembly picking)
+wasm/         kcore exports for the browser (nightly, real atomics: wasm/build.sh)
+web/          browser test page + server (COOP/COEP, POST /result)
+tools/        export_parts.py (CATIA -> PLY via cadcli)
+```
+
+```bash
+cargo build --release -j4
+./target/release/brep check spike/catia_steps.tsv   # import + validate 15 CATIA STEP files, ~40 s
+./target/release/brep bool FILE.stp 1               # A-B, A^B, AuB of the largest shell with a cylinder (validator + volume identities)
+cargo test --release -j4
+./target/release/spike ssi                         # 7 hard SSI cases, < 1 s
+./target/release/spike stress 60                   # 600 random SSI trials, ~9 s
+./target/release/spike pred                        # predicate benchmark
+./target/release/spike bool                        # 7 boolean cases, ~5 s
+./target/release/spike bench                       # architecture benchmarks, ~10 s
+./target/release/spike step spike/catia_steps.tsv  # 27,782 CATIA STEP edges, ~70 s (--pair/--file/--full/--debug)
+python3 -I tools/export_parts.py samples/catia DATA ../cadcore/build/cadcli "ASSEMBLY.CATProduct"
+./target/release/spike real DATA                   # real data; writes DATA/parts.bin/.idx for the web page
+wasm/build.sh && cp DATA/parts.* web/              # then serve web/ (python3 -I web/serve.py) and open it
+```
+
+Status (2026-11-23): brep import + check of 15 CATIA STEP files (83k edges, 13.9k faces): 0 violations; SSI 7/7, stress 600/600, booleans 7/7 (closed shells, volume error <= 1.6e-5), STEP edges
+27,782 with 0 misses, exact predicates 0 wrong signs; browser results bit-identical to native, 3.8-4.1x on 4 workers.
+Resources: at most 4 workers, 8 GB per process.

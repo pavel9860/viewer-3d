@@ -1,0 +1,7 @@
+[package]
+name = "brep"
+version = "0.1.0"
+edition = "2021"
+description = "B-rep kernel core: geometry, topology, import, validation"
+
+[dependencies]
