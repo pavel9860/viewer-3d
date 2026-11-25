@@ -129,11 +129,15 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
 - Edge-curve byte x = 0x80 | map count << 2 | closing bits (no separate count in 2012+).
 - Open (2012+): classes 152,
   155, 251 and code 16 (as in the varint dialect), the meaning of line bit 5 on +directions.
-- Results 2012+ (657 streams, vs stored tessellation): 493 parts fully decoded, but only 55 closed
-  within 1% and 56 more within 5%; 417 meshes have open edges. Closure checks on edge curves and
-  vertices pass, so the fault is elsewhere (coedge ranges of edges not covered by those checks, loop
-  or shell senses, or derived line ranges); not found yet. 2011Spring and the varint dialect are
-  unchanged (120 / 172 within 1%).
+- 2012+ fixes found by meshing (an edge's coedges / loops in UV, not covered by the closure checks):
+  map-1 edge curves with two curves take b0 / b1 from a0 / a1 by the x bits (the single-curve rule
+  applies only to one-curve edge curves); point start / end codes use the edge curve's range, or the
+  first curve's range when that is the infinite default; points keep every ref whose code is start
+  / end; general and -direction lines: bit 2 = range derived (stored: origin [and direction]), bits
+  4 / 5 = origin on the box start / end of the other parameter.
+- Results 2012+ (657 streams, vs stored tessellation): 514 parts fully decoded; 187 closed within
+  1%, 128 more within 5%, 199 off. Open lead: a full circle split into two edges on one edge curve,
+  where an "end" code resolves to the full range end for the first half. 2011Spring and the varint
+  dialect unchanged (120 / 172 within 1%).
 - B-rep-only compact parts (55): the 14 of the 2011Spring family decode completely but hold no solid
-  (9 only the origin planes, the rest sheets); the 30 of 2012+ now decode but their meshes are not
-  yet trustworthy (above); 11 are 2009Fall (bodies not decoded).
+  (9 only the origin planes, the rest sheets); the 30 of 2012+ decode (meshes as above); 11 are 2009Fall (bodies not decoded).
