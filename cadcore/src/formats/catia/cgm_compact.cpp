@@ -195,7 +195,7 @@ void edge_curve_derived(In& in, Out& o, const std::vector<std::uint32_t>& refs, 
         const int m = h & 4 ? 0 : in.i16();
         const bool last = j + 1 == n;
         double a0, a1;
-        if (n == 1 && (m == 0 || m == 1) && (x & 3)) {
+        if (refs.size() == 1 && m == 0 && (x & 3)) {
             const auto& pr = cx.curve_range(refs.at(0), in.at);
             a0 = x & 1 ? pr[0] : in.f64();
             a1 = x & 2 ? pr[1] : in.f64();
@@ -211,8 +211,8 @@ void edge_curve_derived(In& in, Out& o, const std::vector<std::uint32_t>& refs, 
         }
         const double tol = in.f64();
         o.i16(m); o.f64(a0); o.f64(a1); o.f64(tol);
-        if (m == 1) {
-            const double b0 = in.f64(), b1 = in.f64();
+        if (m == 1) {  // identity: x bits 0 / 1 take its range from the first
+            const double b0 = x & 1 ? a0 : in.f64(), b1 = x & 2 ? a1 : in.f64();
             o.f64(b0); o.f64(b1); o.f64(last && (h & 1) && !tail ? 0.0 : in.f64());
             continue;
         }
@@ -228,7 +228,11 @@ void edge_curve_derived(In& in, Out& o, const std::vector<std::uint32_t>& refs, 
     }
     if (tail) { o.f64(x & 1 ? f0 : in.f64()); o.f64(x & 2 ? f1 : in.f64()); o.f64(h & 1 ? 0.0 : in.f64()); }
     for (int i = 0; i < 4; ++i) o.u8(0);
-    cx.range[self] = {f0, f1};
+    // points take start / end from this range; when it is the infinite default (|t| >= 1e6), from
+    // the first curve's own range
+    auto it = cx.range.find(refs.at(0));
+    const bool infinite = std::abs(f0) >= 1e6 || std::abs(f1) >= 1e6;
+    cx.range[self] = infinite && it != cx.range.end() ? it->second : std::array<double, 2>{f0, f1};
 }
 
 }  // namespace
@@ -258,22 +262,24 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
                 const auto refs = in.refs();
                 if (refs.empty()) bad("point without curves", r.offset);
                 const std::uint8_t cd = in.u8();
-                const int code = cd >> 2 & 3;
-                double q;
-                const std::int32_t k = 1;  // the varint dialect's int (not used by the decoder)
-                if (code == 0) {
-                    q = in.f64();
-                } else if (code == 3) {
-                    bad("point parameter code 3", r.offset);
-                } else {
-                    const auto& rg = cx->curve_range(refs[0], r.offset);
-                    q = code == 2 ? rg[0] : rg[1];
-                }
-                in.k = in.b.size;  // the other refs' fields (not decoded)
-                c.refs = {refs[0]};
-                o.count(1);
-                o.f64(q);
-                o.i32(k);
+                // codes per ref: refs[0] (and refs[1] when bit 7) bits 2-3; then refs[1] bits 4-5 (no
+                // bit 7) or refs[2] bits 0-1 (bit 7): 2 start, 1 end of the curve's range, 0 stored
+                std::vector<std::pair<std::uint32_t, double>> qs;
+                auto at_end = [&](std::uint32_t ref, int code) {
+                    const auto& rg = cx->curve_range(ref, r.offset);
+                    return code == 2 ? rg[0] : rg[1];
+                };
+                const int c0 = cd >> 2 & 3;
+                if (c0 == 3) bad("point parameter code 3", r.offset);
+                const double q0 = c0 == 0 ? in.f64() : at_end(refs[0], c0);
+                qs.push_back({refs[0], q0});
+                std::size_t next = 1;
+                if (cd & 0x80) { if (refs.size() > 1) { qs.push_back({refs[1], c0 == 0 ? q0 : at_end(refs[1], c0)}); } next = 2; }
+                const int c1 = cd & 0x80 ? (cd & 3) : (cd >> 4 & 3);
+                if (next < refs.size() && (c1 == 1 || c1 == 2) && cx->range.count(refs[next])) qs.push_back({refs[next], at_end(refs[next], c1)});
+                in.k = in.b.size;  // stored parameters of the other refs (not decoded)
+                o.count(std::uint32_t(qs.size()));
+                for (const auto& [ref, q] : qs) { c.refs.push_back(ref); o.f64(q); o.i32(1); }
                 break;
             }
             c.refs = in.refs();
@@ -353,14 +359,20 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
                     o0 = vert ? cc : 0; o1 = vert ? 0 : cc; d0 = vert ? 0 : 1; d1 = vert ? 1 : 0;
                 } else if (f & 0xc0) {
                     const bool vert = f & 64;
-                    if (f & 0x30) { const auto& b = box(); t0 = -b[vert ? 3 : 1]; t1 = -b[vert ? 2 : 0]; }
+                    // bit 2: t = minus the box range along the line; bits 4 / 5: o on the box start / end
+                    // of the other parameter (o along = 0); else stored
+                    if (f & 4) { const auto& b = box(); t0 = -b[vert ? 3 : 1]; t1 = -b[vert ? 2 : 0]; }
                     else { t0 = in.f64(); t1 = f & 8 ? -t0 : in.f64(); }
-                    if (f & 4) { o0 = 0; o1 = 0; } else { o0 = in.f64(); o1 = in.f64(); }
+                    if (f & 0x30) {
+                        const double cc = box()[(vert ? 0 : 2) + (f & 0x20 ? 1 : 0)];
+                        o0 = vert ? cc : 0; o1 = vert ? 0 : cc;
+                    } else { o0 = in.f64(); o1 = in.f64(); }
                     d0 = vert ? 0 : -1; d1 = vert ? -1 : 0;
                 } else {
                     if (f & 0x30) throw DecodeError(ErrorCode::Unsupported, "line form " + std::to_string(f) + " not decoded", r.offset);
-                    t0 = in.f64(); t1 = f & 8 ? -t0 : in.f64();
-                    if (f & 4) { o0 = 0; o1 = 0; } else { o0 = in.f64(); o1 = in.f64(); }
+                    // bit 2: no range stored (the infinite default)
+                    if (f & 4) { t0 = -1e7; t1 = 1e7; } else { t0 = in.f64(); t1 = f & 8 ? -t0 : in.f64(); }
+                    o0 = in.f64(); o1 = in.f64();
                     d0 = in.f64(); d1 = in.f64();
                 }
                 for (double v : {o0, o1, d0, d1, t0, t1}) o.f64(v);

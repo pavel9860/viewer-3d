@@ -364,6 +364,13 @@ pub fn intersect_sag(a: &dyn Surf, b: &dyn Surf, tol: f64, ang: f64, sag: f64) -
         2.0 * m
     };
     let reach = cell(&sa) + cell(&sb) + tol;
+    // exact distance function on one side (analytic surfaces; 1-Lipschitz): if every sample of the other surface is
+    // farther than its cell size, the surfaces cannot meet
+    let apart = |g: &[(f64, f64, V)], other: &dyn Surf| {
+        let c = cell(g) + tol;
+        g.iter().all(|x| other.implicit(x.2).map_or(false, |d| d > c))
+    };
+    if apart(&sa, b) || apart(&sb, a) { return (vec![], 0); }
     let mut curves: Vec<Curve> = vec![];
     let mut branches: Vec<[f64; 4]> = vec![];
     let covered = |curves: &Vec<Curve>, p: V, tol: f64| curves.iter().any(|cv| {
