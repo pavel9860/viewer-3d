@@ -95,8 +95,11 @@ fn face_mesh(b: &Body, fi: u32, f: Id<Face>, o: &Opts, sag: &HashMap<Id<Edge>, f
     // ring points and their keys (the ring of a loop is its items' points without each item's last point)
     let mut rings: Vec<Vec<P2>> = vec![];
     let mut rkeys: Vec<Vec<(Key, V)>> = vec![];
+    // B-rep edges each ring point lies on (a vertex lies on two)
+    let mut ron: Vec<Vec<[u32; 2]>> = vec![];
     for l in &tr.loops {
         let (mut r, mut k) = (vec![], vec![]);
+        let mut on = vec![];
         for (ii, it) in l.iter().enumerate() {
             let n = it.uv.len();
             // as Trim::ring: the last point stays when the next edge starts elsewhere in UV (a pole line)
@@ -105,13 +108,24 @@ fn face_mesh(b: &Body, fi: u32, f: Id<Face>, o: &Opts, sag: &HashMap<Id<Edge>, f
                 let key = if j == 0 { Key::V(it.v[0].0) } else if j == n - 1 { Key::V(it.v[1].0) } else { Key::E(it.e.0, if it.sense { j } else { n - 1 - j } as u32) };
                 r.push(it.uv[j]);
                 k.push((key, it.p[j]));
+                let other = if j == 0 { l[(ii + l.len() - 1) % l.len()].e.0 } else if j == n - 1 { l[(ii + 1) % l.len()].e.0 } else { it.e.0 };
+                on.push([it.e.0, other]);
             }
         }
         rings.push(r);
         rkeys.push(k);
+        ron.push(on);
     }
+    // a single clockwise loop (not wrapping a period) still bounds the region inside it: triangulate it reversed and
+    // orient the triangles along the loop, so shared edges stay opposite to the neighbouring faces
+    let cw = rings.len() == 1 && crate::trim::area(&rings[0]) < 0.0;
+    if cw { rings[0].reverse(); rkeys[0].reverse(); }
     let (mut uv, src, mut tri) = triangulate_src(&rings);
     let mut keys: Vec<Key> = src.iter().map(|&(r, i)| rkeys[r][i].0).collect();
+    let on: Vec<[u32; 2]> = src.iter().map(|&(r, i)| ron[r][i]).collect();
+    // an interior edge between two points of the same B-rep edge would also exist in the neighbouring face
+    // (non-manifold connectivity): such edges are always split
+    let same_edge = |a: usize, c: usize| a < on.len() && c < on.len() && on[a].iter().any(|e| on[c].contains(e));
     let mut pos: Vec<V> = src.iter().map(|&(r, i)| rkeys[r][i].1).collect();
     let at = |q: P2| { let r = tr.raw(q); s.ev(r[0], r[1]).p };
     let mid = |a: V, c: V| mulv(addv(a, c), 0.5);
@@ -160,7 +174,14 @@ fn face_mesh(b: &Body, fi: u32, f: Id<Face>, o: &Opts, sag: &HashMap<Id<Edge>, f
         dev = 0.0;
         for (ti, t) in tri.iter().enumerate() {
             let mut bad = false;
-            for k in 0..3 { let d = e_of(t[k], t[(k + 1) % 3], &mut err); dev = dev.max(d); bad |= d > o.chord && !boundary.contains(&ekey(t[k], t[(k + 1) % 3])); }
+            for k in 0..3 {
+                let (a, c) = (t[k], t[(k + 1) % 3]);
+                let d = e_of(a, c, &mut err);
+                dev = dev.max(d);
+                let interior = !boundary.contains(&ekey(a, c));
+                bad |= d > o.chord && interior;
+                if interior && same_edge(a, c) { marks.insert(ekey(a, c), usize::MAX); }
+            }
             let cu = [(uv[t[0]][0] + uv[t[1]][0] + uv[t[2]][0]) / 3.0, (uv[t[0]][1] + uv[t[1]][1] + uv[t[2]][1]) / 3.0];
             let dc = norm(sub(at(cu), mulv(addv(addv(pos[t[0]], pos[t[1]]), pos[t[2]]), 1.0 / 3.0)));
             dev = dev.max(dc);
@@ -201,6 +222,7 @@ fn face_mesh(b: &Body, fi: u32, f: Id<Face>, o: &Opts, sag: &HashMap<Id<Edge>, f
         }
         tri = out;
     }
+    if cw { for t in tri.iter_mut() { t.swap(1, 2); } }
     FaceMesh { keys, pos, tri, coarse, dev }
 }
 

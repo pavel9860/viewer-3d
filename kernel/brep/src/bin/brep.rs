@@ -105,6 +105,11 @@ fn mesh_file(f: &str, chord: f64) -> usize {
         dev = dev.max(st.max_dev);
         if sh.closed {
             let (op, nm) = open_edges(&m);
+            if nm > 0 && std::env::var("BREP_DEBUG").is_ok() {
+                let mut u: std::collections::HashMap<(u32, u32), Vec<u32>> = Default::default();
+                for (i, t) in m.tri.iter().enumerate() { for k in 0..3 { let (a, c) = (t[k], t[(k + 1) % 3]); u.entry((a.min(c), a.max(c))).or_default().push(b.faces.get(sh.faces[m.face[i] as usize]).origin.src); } }
+                for (e, f) in u.iter().filter(|x| x.1.len() > 2) { eprintln!("  non-manifold mesh edge {:?} -> {:?} faces STEP {f:?}", m.pos[e.0 as usize], m.pos[e.1 as usize]); }
+            }
             if op > 0 && std::env::var("BREP_DEBUG").is_ok() {
                 let mut d: std::collections::HashMap<(u32, u32), Vec<u32>> = Default::default();
                 for (i, t) in m.tri.iter().enumerate() { for k in 0..3 { d.entry((t[k], t[(k + 1) % 3])).or_default().push(m.face[i]); } }

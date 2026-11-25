@@ -17,14 +17,27 @@ pub fn triangulate_src(rings: &[Vec<P2>]) -> (Vec<P2>, Vec<(usize, usize)>, Vec<
     // vertices with ring neighbours
     let (mut p, mut prev, mut next): (Vec<P2>, Vec<usize>, Vec<usize>) = (vec![], vec![], vec![]);
     let mut src = vec![];
+    // rings that touch another ring at a point are spliced into it there (one weakly simple ring)
+    let mut merged: Vec<Vec<(P2, (usize, usize))>> = vec![];
     for (ri, r) in rings.iter().enumerate() {
-        let mut q: Vec<(P2, usize)> = vec![];
-        for (k, &x) in r.iter().enumerate() { if q.last().map(|l| l.0) != Some(x) { q.push((x, k)); } }
+        let mut q: Vec<(P2, (usize, usize))> = vec![];
+        for (k, &x) in r.iter().enumerate() { if q.last().map(|l| l.0) != Some(x) { q.push((x, (ri, k))); } }
         while q.len() > 1 && q[0].0 == q[q.len() - 1].0 { q.pop(); }
+        let touch = merged.iter().enumerate().find_map(|(mi, m)| q.iter().position(|a| m.iter().any(|b| b.0 == a.0)).map(|j| (mi, j, m.iter().position(|b| b.0 == q[j].0).unwrap())));
+        match touch {
+            Some((mi, j, i)) => {
+                let m = &mut merged[mi];
+                let spliced: Vec<_> = m[..=i].iter().copied().chain(q[j + 1..].iter().copied()).chain(q[..=j].iter().copied()).chain(m[i + 1..].iter().copied()).collect();
+                *m = spliced;
+            }
+            None => merged.push(q),
+        }
+    }
+    for q in merged {
         if q.len() < 3 { continue; }
         let s = p.len();
         let n = q.len();
-        for (k, (x, i)) in q.into_iter().enumerate() { p.push(x); src.push((ri, i)); prev.push(s + (k + n - 1) % n); next.push(s + (k + 1) % n); }
+        for (k, (x, from)) in q.into_iter().enumerate() { p.push(x); src.push(from); prev.push(s + (k + n - 1) % n); next.push(s + (k + 1) % n); }
     }
     let n = p.len();
     // a above b: greater y, then smaller x, then smaller index
