@@ -104,11 +104,36 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   classes the varint-dialect decoder lacks too (216, 211, 243 surfaces; 152, 155, 170 p-curves;
   codes 33, 28, 22, 16). vs stored tessellation: 209 complete parts, 120 closed within 1%, 54 more
   within 5%. Old dialect unchanged (172 closed within 1% of 218 complete).
-- 2012+ (`08 b5 75`): topology already fits the 2011 grammar (compact integers, edge-curve ref
-  kept; some shells carry an extra 0 before their bits); points, edge curves, lines, planes and
-  Hermite curves use new encodings (below). Old twins re-saved by 2012+ are reparametrized
-  (p-curve directions, plane frames differ), so values pair only approximately.
-- 2012+ plane: compact integer header v; bits 0-2 origin component zero; bit 3 U is the unit
-  vector of its one free component; bits 4-6 U component zero; bit 7 / 8-10 the same for V;
-  bit 11 scale (1, 1); bit 12 default box; then the stored doubles (295,743 records, all with
-  orthonormal U V). Some planes in the same files use other headers (`e4 xx`, 2011 form).
+- Compact integer, corrected: first byte b, low bits 00/10: n = bits 2-3 bytes follow and b's high
+  nibble tops the value (v = (b >> 4) << 8n | bytes). The old reading (n = b >> 2) only held for
+  b < 0x10; the 2-byte plane headers (`b4 d4`, `e4 59`, `d4 ed`, ...) are this form.
+- 2012+ (`08 b5 75`) decoded (cgm_compact.hpp has the grammar): topology as 2011 with compact
+  integers and the edge-curve reference kept; values that equal parameters of other records are
+  omitted, resolved in passes (surface boxes, p-curve ranges, edge-curve ranges, points).
+  Verified by closure on the first streams: every p-curve pair of an edge curve meets in 3D (2,058
+  checks, 0 apart) and every vertex parameter lands on all its curves (1,386 checks, 0 apart).
+  - plane: compact-integer header v (bits above) then the stored doubles.
+  - line: flag byte (directions in bits 0, 1, 6, 7; +directions store [c, t0, t1], bit 4: c = box
+    start of the other parameter, bit 2: t0 = box start, bit 3: t1 = box end or -t0; -directions and
+    general lines store the range first, then o (and d)).
+  - edge curve: byte 0x80 | maps << 2 | bit 0 / bit 1: the closing range's start / end equal the first range's;
+    for one curve with map 0 or 1 the first range is the p-curve's own range.
+  - point: code byte; bit 7: refs 0 and 1 share the parameter; bits 2-3: refs[0] at the start (2)
+    or end (1) of its edge curve's range, or a stored f64 (0). The other refs' fields are skipped
+    (their parameters follow from the edge-curve maps); the trailing int's presence depends on the
+    curve classes (not needed by the decoder).
+  - knot vectors: form-byte bit 3 omits the multiplicity byte (standard multiplicities).
+  - surface boxes: cylinder u0 u1 v0 v1; cone the same after its scalars; sphere and torus store
+    angles (scaled by r / R to the arc-length parameters); NURBS knot ends; carriers their first
+    reference's, offsets their base's; extrusions u = the profile's range, v from the payload.
+- Edge-curve byte x = 0x80 | map count << 2 | closing bits (no separate count in 2012+).
+- Open (2012+): classes 152,
+  155, 251 and code 16 (as in the varint dialect), the meaning of line bit 5 on +directions.
+- Results 2012+ (657 streams, vs stored tessellation): 493 parts fully decoded, but only 55 closed
+  within 1% and 56 more within 5%; 417 meshes have open edges. Closure checks on edge curves and
+  vertices pass, so the fault is elsewhere (coedge ranges of edges not covered by those checks, loop
+  or shell senses, or derived line ranges); not found yet. 2011Spring and the varint dialect are
+  unchanged (120 / 172 within 1%).
+- B-rep-only compact parts (55): the 14 of the 2011Spring family decode completely but hold no solid
+  (9 only the origin planes, the rest sheets); the 30 of 2012+ now decode but their meshes are not
+  yet trustworthy (above); 11 are 2009Fall (bodies not decoded).

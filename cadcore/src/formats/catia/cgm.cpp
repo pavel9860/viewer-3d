@@ -97,10 +97,11 @@ void frame_compact(ByteView s, std::size_t dir, Stream& out) {
             if ((x & 3) == 1) d = x >> 2;
             else if ((x & 3) == 3) d = -std::int64_t(x >> 2) - 1;
             else {
-                const unsigned n = x >> 2;
+                const unsigned n = x >> 2 & 3;  // bytes that follow; x's high nibble above them
                 if (n + 1 > iw) bad("compact id field", k);
                 std::uint64_t v = 0;
                 for (unsigned i = 0; i < n; ++i) v |= std::uint64_t(s[k + 4 + lw + i]) << (8 * i);
+                v |= std::uint64_t(x >> 4) << (8 * n);
                 d = (x & 3) == 0 ? std::int64_t(v) : -std::int64_t(v) - 1;
             }
             prev = std::uint32_t(std::int64_t(prev) + d);

@@ -16,10 +16,12 @@
 //   compact (2009Fall and later): directory  a8 06 7a u32 level u32 size, then records
 //           u8 marker  u8 flags  u8 type  length  id-field  body[length]
 //           marker high nibble b -> 1-byte length, a -> 4-byte length; low nibble = length width +
-//           id-field width. Type codes are one fixed enumeration (cgm.cpp, compact_class: mapped
-//           from the reference graph of the 65 2009Fall streams, ids absolute u32). Bodies are
-//           not decoded yet: 2009Fall (levels 83..85) keeps varint reference lists but packs the
-//           other fields (1-byte flags, masked doubles); later levels (74..81) pack further.
+//           id-field width. Type codes are one fixed enumeration (cgm.cpp, compact_class). Levels
+//           74..82: the id field is the signed delta from the previous id (compact integer,
+//           cgm_compact.hpp); 2009Fall (levels 83..85) ids are absolute. Bodies: 2011 and later
+//           decode through cgm_compact (per-file feature bytes after the version strings,
+//           `Stream.features`); 2009Fall (varint reference lists, packed fields) and 2011Fall
+//           (06 b5 75) are not decoded yet.
 //   fixed   (CXR4/5, CGA-V2R4): fixed-width records  u32 id  u16 type  b3 00 ...; recognised
 //           but not framed yet (the header's padding before the length varies).
 //

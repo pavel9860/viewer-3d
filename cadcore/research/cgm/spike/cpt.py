@@ -7,7 +7,7 @@ def sint(b,k):
   x=b[k]; lo=x&3
   if lo==1: return x>>2,k+1
   if lo==3: return -((x>>2)+1),k+1
-  n=x>>2; v=int.from_bytes(b[k+1:k+1+n],'little')
+  n=(x>>2)&3; v=int.from_bytes(b[k+1:k+1+n],'little')|((x>>4)<<(8*n))
   if k+1+n>len(b): raise IndexError("cint past end")
   return (v if lo==0 else -v-1),k+1+n
 def records(s):

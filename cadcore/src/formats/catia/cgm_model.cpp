@@ -71,17 +71,18 @@ public:
     Decoder(const Stream& s, std::vector<std::vector<std::uint32_t>> visible, const CompactLayout* layout) : s_(s), visible_(std::move(visible)) {
         if (layout) {
             // compact bodies in canonical (varint-dialect) form
-            for (const Record& rec : s.records) {
+            auto canon = canonical_records(s, *layout);
+            for (std::size_t i = 0; i < s.records.size(); ++i) {
+                const Record& rec = s.records[i];
                 Obj o;
                 o.type = rec.type;
                 o.at = rec.offset;
-                try {
-                    Canonical c = canonical(rec, *layout);
-                    o.refs = std::move(c.refs);
-                    payloads_.push_back(std::move(c.payload));
+                if (canon[i].error.empty()) {
+                    o.refs = std::move(canon[i].c.refs);
+                    payloads_.push_back(std::move(canon[i].c.payload));
                     o.p = ByteView(payloads_.back().data(), payloads_.back().size());
-                } catch (const DecodeError& e) {
-                    o.error = e.what();
+                } else {
+                    o.error = std::move(canon[i].error);
                 }
                 objs_.emplace(rec.id, std::move(o));
             }

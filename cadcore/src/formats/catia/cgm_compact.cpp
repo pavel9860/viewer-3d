@@ -1,6 +1,10 @@
 #include "formats/catia/cgm_compact.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
+#include <unordered_map>
 #include <optional>
 #include <string>
 
@@ -25,11 +29,11 @@ struct In {
         const unsigned lo = x & 3;
         if (lo == 1) return x >> 2;
         if (lo == 3) return -std::int64_t(x >> 2) - 1;
-        const unsigned n = x >> 2;
-        if (n > 8) bad("integer width", at + k - 1);
+        const unsigned n = x >> 2 & 3;  // bytes that follow; the first byte's high nibble tops the value
         need(n);
         std::uint64_t v = 0;
         for (unsigned i = 0; i < n; ++i) v |= std::uint64_t(b[k++]) << (8 * i);
+        v |= std::uint64_t(x >> 4) << (8 * n);
         return lo == 0 ? std::int64_t(v) : -std::int64_t(v) - 1;
     }
     std::uint32_t ref() { return std::uint32_t(std::int64_t(self) - sint()); }
@@ -73,19 +77,44 @@ struct Out {
 
 int pm(int bit) { return bit ? 1 : -1; }
 
+double load_f64_le(const std::uint8_t* p) { double d; std::memcpy(&d, p, 8); return d; }
+
 // Knot vector: int degree, int n, u8 z (4: x = 0 omitted; 0: int x follows), f64 knots[n], u8 1
 // (standard multiplicities: ends degree + 1, interior degree - 2). Written in the varint dialect's
 // form: i32 degree, 0, x, n, 0, knots, i32 multiplicities. Returns the number of poles.
+// Values a 2012+ record may take from others: surface parameter boxes, p-curve and edge-curve ranges.
+struct Ctx {
+    std::unordered_map<std::uint32_t, std::uint16_t> type;
+    std::unordered_map<std::uint32_t, std::array<double, 4>> box;   // u0 u1 v0 v1
+    std::unordered_map<std::uint32_t, std::array<double, 2>> range;  // p-curves, edge curves
+    const std::array<double, 4>& surface_box(std::uint32_t id, std::size_t at) const {
+        auto it = box.find(id);
+        if (it == box.end()) {
+            auto t = type.find(id);
+            throw DecodeError(ErrorCode::Unsupported, "parameter box of surface class " + std::to_string(t == type.end() ? 0 : t->second) + " not established", at);
+        }
+        return it->second;
+    }
+    const std::array<double, 2>& curve_range(std::uint32_t id, std::size_t at) const {
+        auto it = range.find(id);
+        if (it == range.end()) {
+            auto t = type.find(id);
+            throw DecodeError(ErrorCode::Unsupported, "range of curve class " + std::to_string(t == type.end() ? 0 : t->second) + " not available", at);
+        }
+        return it->second;
+    }
+};
+
 std::size_t knot_vector(In& in, Out& o, int& n_out) {
     const int deg = in.i32(), n = in.i32();
-    const std::uint8_t z = in.u8();
-    if (z != 4 && z != 0) bad("knot-vector form byte", in.at);
-    const int x = z ? 0 : in.i32();
+    const std::uint8_t z = in.u8();  // bit 2: x = 0 (omitted); bit 3: multiplicity byte omitted
+    if (z & ~0x0cu) bad("knot-vector form byte", in.at);
+    const int x = z & 4 ? 0 : in.i32();
     if (n < 2 || n > 100000 || deg < 1 || deg > 30) bad("knot vector size", in.at);
     if (n > 2 && deg < 3) throw DecodeError(ErrorCode::Unsupported, "interior knot multiplicity of degree " + std::to_string(deg) + " not established", in.at);
     o.i32(deg); o.i32(0); o.i32(x); o.i32(n); o.i32(0);
     for (int i = 0; i < n; ++i) o.f64(in.f64());
-    if (in.u8() != 1) throw DecodeError(ErrorCode::Unsupported, "knot multiplicities not standard", in.at);
+    if (!(z & 8) && in.u8() != 1) throw DecodeError(ErrorCode::Unsupported, "knot multiplicities not standard", in.at);
     std::size_t sum = 0;
     for (int i = 0; i < n; ++i) { const int m = i == 0 || i == n - 1 ? deg + 1 : deg - 2; o.i32(m); sum += std::size_t(m); }
     n_out = n;
@@ -152,6 +181,56 @@ void edge_curve(In& in, Out& o, std::size_t n_refs) {
     for (int i = 0; i < 4; ++i) o.u8(0);
 }
 
+// 2012+ edge curves: header h, byte x (0x80 | map count << 2 | bit 0: closing t0 = first t0 | bit 1:
+// closing t1 = first t1; one curve with map 0 or 1: the first range is the p-curve's range), maps.
+void edge_curve_derived(In& in, Out& o, const std::vector<std::uint32_t>& refs, Ctx& cx, std::uint32_t self) {
+    const std::uint8_t h = in.u8(), x = in.u8();  // x = 0x80 | maps << 2 | closing derivations
+    const std::uint32_t n = x >> 2 & 0x1f;
+    if (!(x & 0x80) || n == 0 || ((h & 8) && n != 1)) bad("edge-curve derivation byte " + std::to_string(x), in.at);
+    if (n == 0 || n > 16) bad("edge-curve map count", in.at);
+    o.count(n);
+    bool tail = false;
+    double f0 = 0, f1 = 0;
+    for (std::uint32_t j = 0; j < n; ++j) {
+        const int m = h & 4 ? 0 : in.i16();
+        const bool last = j + 1 == n;
+        double a0, a1;
+        if (n == 1 && (m == 0 || m == 1) && (x & 3)) {
+            const auto& pr = cx.curve_range(refs.at(0), in.at);
+            a0 = x & 1 ? pr[0] : in.f64();
+            a1 = x & 2 ? pr[1] : in.f64();
+        } else {
+            a0 = in.f64();
+            a1 = in.f64();
+        }
+        if (j == 0) { f0 = a0; f1 = a1; }
+        if (m == 0) {
+            const double tol = last && (h & 1) ? 0.0 : in.f64();
+            o.i16(m); o.f64(a0); o.f64(a1); o.f64(tol);
+            continue;
+        }
+        const double tol = in.f64();
+        o.i16(m); o.f64(a0); o.f64(a1); o.f64(tol);
+        if (m == 1) {
+            const double b0 = in.f64(), b1 = in.f64();
+            o.f64(b0); o.f64(b1); o.f64(last && (h & 1) && !tail ? 0.0 : in.f64());
+            continue;
+        }
+        tail = true;
+        o.f64(in.f64()); o.f64(in.f64());
+        if (m == 3) { o.f64(in.f64()); o.f64(in.f64()); }
+        else if (m == 5) {
+            const std::uint32_t N = in.count();
+            if (N > 100000) bad("edge-curve table size", in.at);
+            o.count(N);
+            for (std::uint32_t i = 0; i < 2 * N; ++i) o.f64(in.f64());
+        } else if (m != 2) bad("edge-curve map " + std::to_string(m), in.at);
+    }
+    if (tail) { o.f64(x & 1 ? f0 : in.f64()); o.f64(x & 2 ? f1 : in.f64()); o.f64(h & 1 ? 0.0 : in.f64()); }
+    for (int i = 0; i < 4; ++i) o.u8(0);
+    cx.range[self] = {f0, f1};
+}
+
 }  // namespace
 
 std::optional<CompactLayout> compact_layout(const Stream& s) {
@@ -159,11 +238,14 @@ std::optional<CompactLayout> compact_layout(const Stream& s) {
     const std::uint8_t f0 = s.features[0], f1 = s.features[1];
     // 2011Spring streams: feature bytes b5|bf 75|77 (bit 3 of byte 0: compact integers; bit 1 of
     // byte 1: edges without their edge-curve reference).
-    if ((f0 == 0xb5 || f0 == 0xbf) && (f1 == 0x75 || f1 == 0x77)) return CompactLayout{(f0 & 8) != 0, (f1 & 2) == 0};
+    if ((f0 == 0xb5 || f0 == 0xbf) && (f1 == 0x75 || f1 == 0x77)) return CompactLayout{(f0 & 8) != 0, (f1 & 2) == 0, false};
+    // 2012+ streams: 08 b5 75 (then container GUIDs)
+    if (f0 == 0x08 && s.features.size() >= 3 && f1 == 0xb5 && s.features[2] == 0x75) return CompactLayout{true, true, true};
     return std::nullopt;
 }
 
-Canonical canonical(const Record& r, const CompactLayout& L) {
+namespace {
+Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
     In in{r.body, r.id, L.compact_ints, r.offset};
     Out o;
     Canonical c;
@@ -171,6 +253,29 @@ Canonical canonical(const Record& r, const CompactLayout& L) {
     switch (r.type) {
         case 13: case 513: c.refs = in.refs(); break;
         case 14:
+            if (L.derived) {
+                // refs, code (cgm_compact.hpp); canonical: refs[0] (an edge curve or p-curve) and its parameter
+                const auto refs = in.refs();
+                if (refs.empty()) bad("point without curves", r.offset);
+                const std::uint8_t cd = in.u8();
+                const int code = cd >> 2 & 3;
+                double q;
+                const std::int32_t k = 1;  // the varint dialect's int (not used by the decoder)
+                if (code == 0) {
+                    q = in.f64();
+                } else if (code == 3) {
+                    bad("point parameter code 3", r.offset);
+                } else {
+                    const auto& rg = cx->curve_range(refs[0], r.offset);
+                    q = code == 2 ? rg[0] : rg[1];
+                }
+                in.k = in.b.size;  // the other refs' fields (not decoded)
+                c.refs = {refs[0]};
+                o.count(1);
+                o.f64(q);
+                o.i32(k);
+                break;
+            }
             c.refs = in.refs();
             o.count(std::uint32_t(c.refs.size()));
             for (std::size_t i = 0; i < c.refs.size(); ++i) { o.f64(in.f64()); o.i32(in.i32()); }
@@ -184,6 +289,8 @@ Canonical canonical(const Record& r, const CompactLayout& L) {
         case 520: {
             c.refs = in.refs();
             const std::size_t n = c.refs.size();
+            // 2012+: some shells carry a 0 byte before the bits (the record length decides)
+            if (L.derived && in.left() == (4 + n + 7) / 8 + 2 && in.b[in.k] == 0) in.u8();
             const auto bt = in.bits(4 + n);
             const int code = bt[0] | bt[1] << 1 | bt[2] << 2 | bt[3] << 3;
             const int kind = code == 1 ? 1 : code == 3 ? 3 : code == 8 ? -1 : 0;
@@ -226,9 +333,40 @@ Canonical canonical(const Record& r, const CompactLayout& L) {
         case 524: c.refs = in.refs(1); o.i16(in.i16()); break;
         case 525: c.refs = in.refs(); o.i32(in.i32()); o.i16(in.i16()); break;
         case 500: case 502: c.refs = in.refs(); in.k = in.b.size; break;  // payload not used by the decoder
-        case 191: case 192: case 193: c.refs = in.refs(); edge_curve(in, o, c.refs.size()); break;
+        case 191: case 192: case 193:
+            c.refs = in.refs();
+            if (L.derived) edge_curve_derived(in, o, c.refs, *cx, r.id);
+            else edge_curve(in, o, c.refs.size());
+            break;
         case 150: {
             c.refs = in.refs(1);
+            if (L.derived) {
+                const std::uint8_t f = in.u8();
+                auto box = [&]() -> const std::array<double, 4>& { return cx->surface_box(c.refs[0], r.offset); };
+                double o0, o1, d0, d1, t0, t1;
+                if (f & 3) {
+                    const bool vert = f & 1;
+                    if (f & 0x20) throw DecodeError(ErrorCode::Unsupported, "line form " + std::to_string(f) + " not decoded", r.offset);
+                    const double cc = f & 16 ? box()[vert ? 0 : 2] : in.f64();
+                    t0 = f & 4 ? box()[vert ? 2 : 0] : in.f64();
+                    t1 = f & 8 ? (f & 4 ? box()[vert ? 3 : 1] : -t0) : in.f64();
+                    o0 = vert ? cc : 0; o1 = vert ? 0 : cc; d0 = vert ? 0 : 1; d1 = vert ? 1 : 0;
+                } else if (f & 0xc0) {
+                    const bool vert = f & 64;
+                    if (f & 0x30) { const auto& b = box(); t0 = -b[vert ? 3 : 1]; t1 = -b[vert ? 2 : 0]; }
+                    else { t0 = in.f64(); t1 = f & 8 ? -t0 : in.f64(); }
+                    if (f & 4) { o0 = 0; o1 = 0; } else { o0 = in.f64(); o1 = in.f64(); }
+                    d0 = vert ? 0 : -1; d1 = vert ? -1 : 0;
+                } else {
+                    if (f & 0x30) throw DecodeError(ErrorCode::Unsupported, "line form " + std::to_string(f) + " not decoded", r.offset);
+                    t0 = in.f64(); t1 = f & 8 ? -t0 : in.f64();
+                    if (f & 4) { o0 = 0; o1 = 0; } else { o0 = in.f64(); o1 = in.f64(); }
+                    d0 = in.f64(); d1 = in.f64();
+                }
+                for (double v : {o0, o1, d0, d1, t0, t1}) o.f64(v);
+                cx->range[r.id] = {t0, t1};
+                break;
+            }
             const int form = in.i16();
             double v[6];
             if (form == 0) { for (double& x : v) x = in.f64(); }
@@ -240,21 +378,26 @@ Canonical canonical(const Record& r, const CompactLayout& L) {
         }
         case 151: {
             c.refs = in.refs(1);
-            const double cx = in.f64(), cy = in.f64();
+            const double c0 = in.f64(), c1 = in.f64();
             // r t0 t1, flag byte (1: scale 1), [scale], offset; some objects of raw-integer streams
             // carry two i32 (1, 1) after the centre
             auto fits = [&](std::size_t k) {
                 return k + 24 < in.b.size && in.b[k + 24] <= 1 && in.b.size - k == 25 + (in.b[k + 24] == 0 ? 8u : 0u) + 8;
             };
-            bool plain = fits(in.k), ints = fits(in.k + 8);
-            if (plain && ints && load_u32(in.b.data + in.k, false) == 1 && load_u32(in.b.data + in.k + 4, false) == 1) plain = false;
+            // the two ints are raw i32 (raw-integer streams) or compact integers (05 05)
+            const std::size_t iw = L.compact_ints ? 2 : 8;
+            bool plain = fits(in.k), ints = fits(in.k + iw);
+            const bool ones = L.compact_ints ? in.left() >= 2 && in.b[in.k] == 5 && in.b[in.k + 1] == 5
+                                             : in.left() >= 8 && load_u32(in.b.data + in.k, false) == 1 && load_u32(in.b.data + in.k + 4, false) == 1;
+            if (plain && ints) plain = !ones;
             if (plain == ints) bad("circle layout", r.offset);
-            if (ints) in.raw(8);
-            o.f64(cx); o.f64(cy); o.i32(1); o.i32(1);
+            if (ints) in.raw(iw);
+            o.f64(c0); o.f64(c1); o.i32(1); o.i32(1);
             const double rad = in.f64(), t0 = in.f64(), t1 = in.f64();
             const std::uint8_t f = in.u8();
             const double s = f == 1 ? 1.0 : in.f64();
             o.f64(rad); o.f64(t0); o.f64(t1); o.f64(s); o.f64(in.f64());
+            if (cx) cx->range[r.id] = {t0, t1};
             break;
         }
         case 160: {
@@ -269,7 +412,9 @@ Canonical canonical(const Record& r, const CompactLayout& L) {
             const int has2 = in.i16();
             o.i16(has2);
             if (has2) for (int i = 0; i < 2 * n; ++i) o.f64(in.f64());
-            o.f64(in.f64()); o.f64(in.f64());
+            const double t0 = in.f64(), t1 = in.f64();
+            o.f64(t0); o.f64(t1);
+            if (cx) cx->range[r.id] = {t0, t1};
             if (in.i16() != -2) bad("Hermite closing value", r.offset);
             break;
         }
@@ -281,10 +426,47 @@ Canonical canonical(const Record& r, const CompactLayout& L) {
             const std::size_t m = nu * nv * (rat ? 4 : 3);
             if (m > (in.left() / 8)) bad("NURBS poles past the record", r.offset);
             for (std::size_t i = 0; i < m; ++i) o.f64(in.f64());
-            o.raw(in.raw(in.left()));  // trailing block (152 or 154 bytes; not decoded)
+            // trailing block (not decoded; 152 or 154 bytes in 2011, compressed in 2012+); it ends with
+            // two ints -2
+            const ByteView blk = in.raw(in.left());
+            if (L.derived && (blk.size < 2 || blk[blk.size - 1] != 0x07 || blk[blk.size - 2] != 0x07)) bad("NURBS closing block", r.offset);
+            o.raw(blk);
+            if (cx) {
+                // parameter box: the knot ranges
+                auto knot = [&](std::size_t kv_at, int which) {
+                    const std::size_t n = load_u32(o.p.data() + kv_at + 12, false);
+                    return load_f64_le(o.p.data() + kv_at + 20 + 8 * (which ? n - 1 : 0));
+                };
+                const std::size_t v_at = 20 + std::size_t(nu_k) * 12;
+                cx->box[r.id] = {knot(0, 0), knot(0, 1), knot(v_at, 0), knot(v_at, 1)};
+            }
             break;
         }
         case 200: {
+            if (L.derived) {
+                const std::int64_t v = in.sint();
+                if (v < 0 || v >> 13) throw DecodeError(ErrorCode::Unsupported, "plane header form not decoded", r.offset);
+                double w[9];
+                auto vec = [&](double* x, int zero, bool unit) {
+                    int free = 0;
+                    for (int j = 0; j < 3; ++j) free += !(zero >> j & 1);
+                    if (unit && free != 1) throw DecodeError(ErrorCode::Unsupported, "plane header form not decoded", r.offset);
+                    for (int j = 0; j < 3; ++j) x[j] = zero >> j & 1 ? 0.0 : unit ? 1.0 : in.f64();
+                };
+                vec(w, int(v & 7), false);
+                vec(w + 3, int(v >> 4 & 7), v >> 3 & 1);
+                vec(w + 6, int(v >> 8 & 7), v >> 7 & 1);
+                for (double x : w) o.f64(x);
+                if (v >> 11 & 1) { o.f64(1); o.f64(1); } else { o.f64(in.f64()); o.f64(in.f64()); }
+                std::array<double, 4> bx{-1e7, 1e7, -1e7, 1e7};
+                if (!(v >> 12 & 1)) for (double& x : bx) x = in.f64();
+                for (double x : bx) o.f64(x);
+                auto nrm = [](const double* x) { return x[0] * x[0] + x[1] * x[1] + x[2] * x[2]; };
+                if (std::abs(nrm(w + 3) - 1) > 1e-9 || std::abs(nrm(w + 6) - 1) > 1e-9 || std::abs(w[3] * w[6] + w[4] * w[7] + w[5] * w[8]) > 1e-9)
+                    throw DecodeError(ErrorCode::Unsupported, "plane header form not decoded (frame not orthonormal)", r.offset);
+                cx->box[r.id] = bx;
+                break;
+            }
             for (int i = 0; i < 3; ++i) o.f64(in.f64());
             const std::uint8_t m = in.u8();
             for (int j = 0; j < 6; ++j) o.f64(m >> j & 1 ? 0.0 : in.f64());
@@ -305,9 +487,20 @@ Canonical canonical(const Record& r, const CompactLayout& L) {
             o.f64(f & 1 ? 1.0 : in.f64());
             o.f64(f & 2 ? 1.0 : in.f64());
             o.f64(f & 4 ? v[1] : in.f64());
+            if (cx) cx->box[r.id] = {v[1], v[2], v[3], v[4]};
             break;
         }
-        case 10: case 100: case 202: case 203: case 204: case 216: case 243: o.raw(in.raw(in.left())); break;
+        case 10: case 100: case 202: case 203: case 204: case 216: case 243:
+            o.raw(in.raw(in.left()));
+            if (cx) {
+                auto at = [&](int i) { return load_f64_le(o.p.data() + 8 * i); };
+                // boxes (u0 u1 v0 v1) in the parameters the p-curves use: cone as stored; sphere and
+                // torus store angles, their parameters are arc lengths (u = R a, v = r b)
+                if (r.type == 202 && o.p.size() == 184) cx->box[r.id] = {at(14), at(15), at(16), at(17)};
+                if (r.type == 203 && o.p.size() >= 17 * 8) cx->box[r.id] = {at(13) * at(12), at(14) * at(12), at(15) * at(12), at(16) * at(12)};
+                if (r.type == 204 && o.p.size() >= 18 * 8) cx->box[r.id] = {at(14) * at(12), at(15) * at(12), at(16) * at(13), at(17) * at(13)};
+            }
+            break;
         // the decoder uses the references and the leading doubles of these (cgm_model.hpp)
         case 12: case 155: case 210: case 211: case 212: c.refs = in.refs(1); o.raw(in.raw(in.left())); break;
         case 214: c.refs = in.refs(2); o.raw(in.raw(in.left())); break;
@@ -318,6 +511,79 @@ Canonical canonical(const Record& r, const CompactLayout& L) {
     if (in.left()) bad(std::to_string(in.left()) + " bytes past the class grammar", r.offset);
     c.payload = std::move(o.p);
     return c;
+}
+}  // namespace
+
+Canonical canonical(const Record& r, const CompactLayout& L) {
+    if (L.derived) throw DecodeError(ErrorCode::Unsupported, "record with derived values needs its stream (canonical_records)", r.offset);
+    return canonical_in(r, L, nullptr);
+}
+
+std::vector<CanonicalRecord> canonical_records(const Stream& s, const CompactLayout& L) {
+    std::vector<CanonicalRecord> out(s.records.size());
+    Ctx cx;
+    for (const Record& r : s.records) cx.type[r.id] = r.type;
+    auto pass = [](std::uint16_t t) {
+        if ((t >= 200 && t < 300) || t == 10 || t == 12 || t == 100) return 0;  // surfaces, points in space
+        if (t >= 150 && t < 191) return 1;                                     // p-curves
+        if (t >= 191 && t <= 193) return 2;                                    // edge curves
+        if (t == 14 || t == 13) return 3;                                      // points on curves
+        return 4;
+    };
+    for (int p = 0; p < 5; ++p) {
+        for (std::size_t i = 0; i < s.records.size(); ++i) {
+            const Record& r = s.records[i];
+            if (pass(r.type) != p) continue;
+            try {
+                out[i].c = canonical_in(r, L, L.derived ? &cx : nullptr);
+            } catch (const DecodeError& e) {
+                out[i].error = "class " + std::to_string(r.type) + " record " + std::to_string(r.id) + ": " + e.what();
+            }
+        }
+        // carriers (212, 241, 242, 244) use their first reference's parameters, offsets (214) their
+        // base's (refs[1])
+        for (bool more = p == 0; more;) {
+            more = false;
+            for (std::size_t i = 0; i < s.records.size(); ++i) {
+                const std::uint16_t t = s.records[i].type;
+                const std::size_t j = t == 214 ? 1 : 0;
+                if ((t != 212 && t != 214 && t != 241 && t != 242 && t != 244) || !out[i].error.empty() || out[i].c.refs.size() <= j || cx.box.count(s.records[i].id)) continue;
+                if (auto it = cx.box.find(out[i].c.refs[j]); it != cx.box.end()) { cx.box[s.records[i].id] = it->second; more = true; }
+            }
+        }
+        // extrusions (210): u along the profile (its range), v from the payload (d[3] v0 v1); lines on
+        // them decode once the profile's range is known, so the p-curve pass runs again for them
+        if (p == 1 && L.derived) {
+            bool added = false;
+            for (std::size_t i = 0; i < s.records.size(); ++i) {
+                const Record& r = s.records[i];
+                if (r.type != 210 || !out[i].error.empty() || out[i].c.refs.empty() || out[i].c.payload.size() < 40 || cx.box.count(r.id)) continue;
+                std::uint32_t prof = out[i].c.refs[0];
+                if (auto t = cx.type.find(prof); t != cx.type.end() && t->second >= 191 && t->second <= 193) {
+                    // an edge curve: its first curve's range
+                    for (std::size_t m = 0; m < s.records.size(); ++m)
+                        if (s.records[m].id == prof && out[m].error.empty() && !out[m].c.refs.empty()) prof = out[m].c.refs[0];
+                }
+                auto rg = cx.range.find(prof);
+                if (rg == cx.range.end()) continue;
+                const std::uint8_t* q = out[i].c.payload.data();
+                cx.box[r.id] = {rg->second[0], rg->second[1], load_f64_le(q + 24), load_f64_le(q + 32)};
+                added = true;
+            }
+            if (added)
+                for (std::size_t i = 0; i < s.records.size(); ++i) {
+                    const Record& r = s.records[i];
+                    if (pass(r.type) != 1 || out[i].error.empty()) continue;
+                    try {
+                        out[i].c = canonical_in(r, L, &cx);
+                        out[i].error.clear();
+                    } catch (const DecodeError& e) {
+                        out[i].error = "class " + std::to_string(r.type) + " record " + std::to_string(r.id) + ": " + e.what();
+                    }
+                }
+        }
+    }
+    return out;
 }
 
 }  // namespace cadcore::formats::catia::cgm

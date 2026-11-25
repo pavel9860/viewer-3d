@@ -3,8 +3,9 @@
 //
 // Compact bodies, as established against records of the same parts saved by older releases
 // (research/cgm/FINDINGS.md, "Compact dialect bodies"):
-//   signed integer  first byte b: low bits 01 -> +(b >> 2); 11 -> -((b >> 2) + 1); 00 -> (b >> 2)
-//                   bytes follow (little-endian, positive); 10 -> the same, negative (-v - 1)
+//   signed integer  first byte b: low bits 01 -> +(b >> 2); 11 -> -((b >> 2) + 1); 00 -> n = bits 2-3
+//                   bytes follow (little-endian), b's high nibble above them: v = (b >> 4) << 8n | bytes;
+//                   10 -> the same, negative (-v - 1)
 //   reference       a signed integer d, target = own id - d
 //   reference list  varint count (as in the varint dialect) for variable lists, none for fixed arity
 //   small integers  (the varint dialect's i16 / i32 fields) signed integers when the stream's header
@@ -41,10 +42,33 @@
 //   10, 100, 202, 203, 204, 216, 243 unchanged; 12, 155, 210, 211, 212: ref + unchanged; 214: two refs +
 //                   unchanged; 241, 242, 244, 251: refs + unchanged (the decoder reads their references
 //                   and leading doubles only)
+//
+// 2012+ streams (feature bytes 08 b5 75): compact integers, edges keep their edge-curve reference, and
+// values that equal parameters of other records are omitted (verified by closure: the p-curves of
+// every checked edge curve meet in 3D, and every checked vertex parameter lands on all its curves):
+//   knot vector     form byte bit 3: standard multiplicities, the multiplicity byte is omitted
+//   520 shell       some shells carry one 0 byte before the bits (the record length decides)
+//   200 plane       int v; bits 0-2: origin component zero; 3: U is the unit vector of its one free
+//                   component; 4-6: U component zero; 7, 8-10: the same for V; 11: scale (1, 1);
+//                   12: default box; then the stored doubles (o U V scale box)
+//   150 line        ref, u8 f. Directions: bit 0 (0, 1), bit 1 (1, 0), bit 6 (0, -1), bit 7 (-1, 0),
+//                   none: stored. +v / +u: [c, t0, t1] with o = (c, 0) / (0, c); bit 4: c = box start
+//                   of the other parameter; bit 2: t0 = box start; bit 3: t1 = box end if t0 is
+//                   derived, else -t0. -v / -u: [t0, t1, o]; bit 2: o = 0; bit 3: t1 = -t0; bit 4 or
+//                   5: t = minus the box range. General: [t0, t1, o, d]; bit 2: o = 0; bit 3: t1 = -t0
+//                   (box: the surface's u0 u1 v0 v1)
+//   191-193         refs, header h, u8 x = 0x80 | map count << 2 | bits (1: closing t0 = first t0,
+//                   2: closing t1 = first t1; for one curve with map 0 or 1 the first range is the
+//                   p-curve's range), maps as above with compact map codes (no separate count)
+//   14 point        refs, u8 code: bit 7 refs 0 and 1 share the parameter; bits 2-3: refs[0]'s
+//                   parameter is 2 the start, 1 the end of the edge curve's range, 0 stored f64 [+ int
+//                   unless the shared curves include a line or circle]; the other refs' fields are
+//                   not decoded (their parameters follow from the edge curve's maps)
 #pragma once
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "formats/catia/cgm.hpp"
@@ -55,10 +79,11 @@ namespace cadcore::formats::catia::cgm {
 struct CompactLayout {
     bool compact_ints = false;   // small integers as signed compact integers
     bool edge_curve_ref = true;  // edges reference their edge curve
+    bool derived = false;        // 2012+: values derived from other records (see canonical_records)
 };
 
-// The layout of a compact stream whose bodies this module decodes; nullopt otherwise (2009Fall,
-// 2011Fall and 2012+ streams use further encodings, not decoded yet).
+// The layout of a compact stream whose bodies this module decodes (2011Spring: b5|bf 75|77;
+// 2012+: 08 b5 75); nullopt otherwise (2009Fall and 2011Fall streams, not decoded yet).
 std::optional<CompactLayout> compact_layout(const Stream& s);
 
 struct Canonical {
@@ -67,8 +92,16 @@ struct Canonical {
     std::vector<std::uint8_t> payload;  // the varint dialect's payload, little-endian
 };
 
-// One compact record in canonical form. Throws DecodeError (Unsupported for classes not mapped or
-// not decoded) when the body does not fit its class grammar exactly.
+// One compact record in canonical form (layouts without derived values). Throws DecodeError
+// (Unsupported for classes not mapped or not decoded) when the body does not fit its class grammar
+// exactly.
 Canonical canonical(const Record& r, const CompactLayout& layout);
+
+// All records of a compact stream in canonical form, in stream order; `error` is set (and the
+// canonical form empty) for a record that did not decode. Layouts with derived values (2012+)
+// resolve them in passes: surfaces (parameter boxes), p-curves (ranges), edge curves (ranges),
+// points, then the rest.
+struct CanonicalRecord { Canonical c; std::string error; };
+std::vector<CanonicalRecord> canonical_records(const Stream& s, const CompactLayout& layout);
 
 }  // namespace cadcore::formats::catia::cgm
