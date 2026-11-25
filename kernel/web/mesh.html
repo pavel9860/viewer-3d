@@ -21,7 +21,7 @@
 const cv = document.getElementById('c');
 // WebGL 2, else WebGL 1 (same GLSL 100 shaders, no vertex array objects), else a slow Canvas-2D fallback
 const gl = cv.getContext('webgl2', { antialias: true }) || cv.getContext('webgl', { antialias: true }) || null;
-const glName = !gl ? '2D canvas (no WebGL in this browser: slow)' : (typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) ? 'WebGL 2' : 'WebGL 1';
+const glName = !gl ? 'software renderer (no WebGL in this browser)' : (typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) ? 'WebGL 2' : 'WebGL 1';
 const ctx2 = gl ? null : cv.getContext('2d');
 const info = document.getElementById('info'), sel = document.getElementById('file');
 const vs = `attribute vec3 p; attribute vec3 n; attribute vec3 col; uniform mat4 mvp; uniform mat3 nm; varying vec3 vn; varying vec3 vc;
@@ -66,25 +66,54 @@ async function load(name) {
 }
 
 function mul(a, b) { const r = new Float32Array(16); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k]; r[i * 4 + j] = s; } return r; }
-// Canvas-2D fallback: painter's algorithm over depth-sorted flat-shaded triangles
-function draw2d(R, V, w, h) {
-  const { pos, nor, col, nt } = mesh, f = 1 / Math.tan(0.4) * h / 2;
-  const tx = p => { const x = R[0] * p[0] + R[4] * p[1] + R[8] * p[2] + V[12], y = R[1] * p[0] + R[5] * p[1] + R[9] * p[2] + V[13], z = R[2] * p[0] + R[6] * p[1] + R[10] * p[2] + V[14]; return [w / 2 + f * x / -z, h / 2 - f * y / -z, z]; };
-  const P = new Float32Array(nt * 9);
-  for (let i = 0; i < nt * 3; i++) P.set(tx([pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]]), 3 * i);
-  const order = [...Array(nt).keys()].sort((a, b) => (P[9 * a + 2] + P[9 * a + 5] + P[9 * a + 8]) - (P[9 * b + 2] + P[9 * b + 5] + P[9 * b + 8]));
-  ctx2.fillStyle = '#1b1d21'; ctx2.fillRect(0, 0, w, h);
-  const faces = document.getElementById('faces').checked, wire = document.getElementById('wire').checked;
-  ctx2.lineWidth = 0.4;
-  for (const t of order) {
-    const nx = R[0] * nor[9 * t] + R[4] * nor[9 * t + 1] + R[8] * nor[9 * t + 2], ny = R[1] * nor[9 * t] + R[5] * nor[9 * t + 1] + R[9] * nor[9 * t + 2], nz = R[2] * nor[9 * t] + R[6] * nor[9 * t + 1] + R[10] * nor[9 * t + 2];
-    const d = 0.25 + 0.75 * Math.abs(0.4 * nx + 0.6 * ny + 1.0 * nz) / Math.hypot(0.4, 0.6, 1.0);
+// Canvas fallback without WebGL: software rasterizer with a per-pixel depth buffer (correct at every angle);
+// half resolution while dragging
+let lowRes = false;
+function draw2d(R, V, W, H) {
+  const k = lowRes ? 2 : 1, w = Math.max(1, (W / k) | 0), h = Math.max(1, (H / k) | 0);
+  const { pos, nor, col, nt } = mesh, f = 1 / Math.tan(0.4) * h / 2, near = 1e-3;
+  const img = ctx2.createImageData(w, h), px = new Uint32Array(img.data.buffer), zb = new Float32Array(w * h).fill(Infinity);
+  px.fill(0xff211d1b);
+  const faces = document.getElementById('faces').checked, wire = document.getElementById('wire').checked && !lowRes;
+  const X = new Float32Array(3), Y = new Float32Array(3), Z = new Float32Array(3);
+  for (let t = 0; t < nt; t++) {
+    let behind = false;
+    for (let j = 0; j < 3; j++) {
+      const i = 3 * (3 * t + j), x = pos[i], y = pos[i + 1], z0 = pos[i + 2];
+      const cx = R[0] * x + R[4] * y + R[8] * z0 + V[12], cy = R[1] * x + R[5] * y + R[9] * z0 + V[13], cz = R[2] * x + R[6] * y + R[10] * z0 + V[14];
+      if (-cz < near) { behind = true; break; }
+      X[j] = w / 2 + f * cx / -cz; Y[j] = h / 2 - f * cy / -cz; Z[j] = -cz;
+    }
+    if (behind) continue;
+    const area = (X[1] - X[0]) * (Y[2] - Y[0]) - (X[2] - X[0]) * (Y[1] - Y[0]);
+    if (area === 0) continue;
+    const n0 = nor[9 * t], n1 = nor[9 * t + 1], n2 = nor[9 * t + 2];
+    const nx = R[0] * n0 + R[4] * n1 + R[8] * n2, ny = R[1] * n0 + R[5] * n1 + R[9] * n2, nz = R[2] * n0 + R[6] * n1 + R[10] * n2;
+    const d = 0.25 + 0.75 * Math.abs(0.4 * nx + 0.6 * ny + nz) / 1.2329;
     const c = faces ? [col[9 * t], col[9 * t + 1], col[9 * t + 2]] : [0.8, 0.8, 0.8];
-    ctx2.fillStyle = `rgb(${c.map(x => Math.round(255 * x * d)).join(',')})`;
-    ctx2.beginPath(); ctx2.moveTo(P[9 * t], P[9 * t + 1]); ctx2.lineTo(P[9 * t + 3], P[9 * t + 4]); ctx2.lineTo(P[9 * t + 6], P[9 * t + 7]); ctx2.closePath();
-    ctx2.fill();
-    if (wire) { ctx2.strokeStyle = '#111'; ctx2.stroke(); } else { ctx2.strokeStyle = ctx2.fillStyle; ctx2.stroke(); }
+    const rgb = 0xff000000 | (Math.min(255, 255 * c[2] * d) << 16) | (Math.min(255, 255 * c[1] * d) << 8) | Math.min(255, 255 * c[0] * d);
+    const x0 = Math.max(0, Math.floor(Math.min(X[0], X[1], X[2]))), x1 = Math.min(w - 1, Math.ceil(Math.max(X[0], X[1], X[2])));
+    const y0 = Math.max(0, Math.floor(Math.min(Y[0], Y[1], Y[2]))), y1 = Math.min(h - 1, Math.ceil(Math.max(Y[0], Y[1], Y[2])));
+    const inv = 1 / area, A = Math.abs(area);
+    // pixel distance to the edge opposite vertex i is b_i * |area| / length_i
+    const l0 = A / Math.hypot(X[1] - X[2], Y[1] - Y[2]), l1 = A / Math.hypot(X[2] - X[0], Y[2] - Y[0]), l2 = A / Math.hypot(X[0] - X[1], Y[0] - Y[1]);
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const sx = x + 0.5, sy = y + 0.5;
+        const b0 = ((X[1] - sx) * (Y[2] - sy) - (X[2] - sx) * (Y[1] - sy)) * inv;
+        const b1 = ((X[2] - sx) * (Y[0] - sy) - (X[0] - sx) * (Y[2] - sy)) * inv;
+        const b2 = 1 - b0 - b1;
+        if (b0 < 0 || b1 < 0 || b2 < 0) continue;
+        const z = b0 * Z[0] + b1 * Z[1] + b2 * Z[2], o = y * w + x;
+        if (z < zb[o]) {
+          zb[o] = z;
+          px[o] = wire && (b0 * l0 < 0.6 || b1 * l1 < 0.6 || b2 * l2 < 0.6) ? 0xff100f0d : rgb;
+        }
+      }
+    }
   }
+  if (k === 1) ctx2.putImageData(img, 0, 0);
+  else { const tmp = document.createElement('canvas'); tmp.width = w; tmp.height = h; tmp.getContext('2d').putImageData(img, 0, 0); ctx2.imageSmoothingEnabled = false; ctx2.drawImage(tmp, 0, 0, W, H); }
 }
 function draw() {
   if (!mesh) return;
@@ -121,8 +150,8 @@ function draw() {
 }
 let drag = null;
 cv.oncontextmenu = e => e.preventDefault();
-cv.onpointerdown = e => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; cv.setPointerCapture(e.pointerId); };
-cv.onpointerup = () => drag = null;
+cv.onpointerdown = e => { lowRes = !gl; drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; cv.setPointerCapture(e.pointerId); };
+cv.onpointerup = () => { drag = null; if (lowRes) { lowRes = false; draw(); } };
 cv.onpointermove = e => { if (!drag) return; const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
   if (drag.pan) { pan[0] += dx * dist / 800; pan[1] -= dy * dist / 800; } else { rot[1] += dx / 200; rot[0] += dy / 200; } draw(); };
 cv.onwheel = e => { e.preventDefault(); dist = Math.min(50, Math.max(0.02, dist * Math.exp(e.deltaY / 500))); draw(); };
