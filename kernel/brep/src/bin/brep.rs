@@ -1,7 +1,8 @@
 //! brep CLI.
 //!   brep check FILE.stp|LIST.tsv          import + validate
 //!   brep bool FILE.stp|LIST.tsv [SHELLS]  booleans of the largest closed shells with a cylinder through them
-//!   brep mesh FILE.stp|LIST.tsv [CHORD]   watertight tessellation (chord relative to the model diagonal, default 1e-3)
+//!   brep mesh FILE.stp|LIST.tsv [CHORD] [--out DIR]   watertight tessellation (chord relative to the model diagonal,
+//!                                         default 1e-3); --out writes DIR/<name>.mesh and DIR/index.json for web/mesh.html
 use brep::boolean::{boolean, Op};
 use brep::geom::*;
 use brep::topo::*;
@@ -18,7 +19,11 @@ fn main() {
     let bad = match args[1].as_str() {
         "check" => files.iter().map(|f| check_file(f)).sum::<usize>(),
         "bool" => { let n = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(2); files.iter().map(|f| bool_file(f, n)).sum() }
-        "mesh" => { let c = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1e-3); files.iter().map(|f| mesh_file(f, c)).sum() }
+        "mesh" => {
+            let out = args.iter().position(|a| a == "--out").and_then(|i| args.get(i + 1)).cloned();
+            let c = args.get(3).filter(|a| !a.starts_with("--")).and_then(|s| s.parse().ok()).unwrap_or(1e-3);
+            files.iter().map(|f| mesh_file(f, c, out.as_deref())).sum()
+        }
         _ => { eprintln!("unknown command {}", args[1]); 2 }
     };
     std::process::exit((bad > 0) as i32);
@@ -89,7 +94,7 @@ fn unmatched(r: &Body, a: &Body, shell: &[Id<Face>], src: &Body) {
 }
 
 /// tessellate every shell; closed shells must give closed meshes. Volume vs the exact face integral is an indicator.
-fn mesh_file(f: &str, chord: f64) -> usize {
+fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
     use brep::tess::{mesh_volume, open_edges, tessellate, Opts};
     let im = match step::import(f) { Ok(i) => i, Err(e) => { println!("{f}: {e}"); return 1 } };
     let b = &im.body;
@@ -97,8 +102,15 @@ fn mesh_file(f: &str, chord: f64) -> usize {
     let o = Opts { chord, ..Default::default() };
     let (mut tris, mut open, mut nonman, mut empty, mut coarse, mut dev, mut vrel) = (0, 0, 0, 0, 0, 0.0f64, 0.0f64);
     let (mut mv, mut ev) = (0.0, 0.0);
+    let mut all = brep::tess::Mesh::default();
     for (_, sh) in b.shells.iter() {
         let (m, st) = tessellate(b, &sh.faces, &o, WORKERS);
+        if out.is_some() {
+            let (base, fbase) = (all.pos.len() as u32, all.face.iter().max().map_or(0, |x| x + 1));
+            all.pos.extend(&m.pos);
+            all.tri.extend(m.tri.iter().map(|t| t.map(|i| i + base)));
+            all.face.extend(m.face.iter().map(|x| x + fbase));
+        }
         tris += m.tri.len();
         empty += st.empty;
         coarse += st.coarse;
@@ -126,8 +138,28 @@ fn mesh_file(f: &str, chord: f64) -> usize {
         }
     }
     let t = ms(t0);
+    if let Some(dir) = out { write_mesh(dir, f.rsplit('/').next().unwrap(), &all, im.diag); }
     let bad = open + empty + coarse;
     println!("{:<26} {} faces -> {tris} triangles in {t:.0} ms | open edges {open} non-manifold {nonman} | empty faces {empty} coarse {coarse} | max dev {:.1e} mm | volume mesh/exact {:.6} (worst shell rel {vrel:.1e}){}",
         f.rsplit('/').next().unwrap(), b.faces.len(), dev * im.diag, mv / ev, if bad > 0 { " FAIL" } else { "" });
     bad
+}
+
+/// little-endian: u32 vertex count, u32 triangle count, f32 xyz per vertex (model units), u32 x3 per triangle,
+/// u32 face id per triangle; DIR/index.json lists the files
+fn write_mesh(dir: &str, name: &str, m: &brep::tess::Mesh, scale: f64) {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut b: Vec<u8> = vec![];
+    b.extend((m.pos.len() as u32).to_le_bytes());
+    b.extend((m.tri.len() as u32).to_le_bytes());
+    for p in &m.pos { for k in 0..3 { b.extend(((p[k] * scale) as f32).to_le_bytes()); } }
+    for t in &m.tri { for k in 0..3 { b.extend(t[k].to_le_bytes()); } }
+    for f in &m.face { b.extend(f.to_le_bytes()); }
+    let file = format!("{}.mesh", name.trim_end_matches(".stp"));
+    std::fs::write(format!("{dir}/{file}"), b).unwrap();
+    let idx = format!("{dir}/index.json");
+    let mut list: Vec<String> = std::fs::read_to_string(&idx).ok().map(|s| s.trim().trim_start_matches('[').trim_end_matches(']').split(',').map(|x| x.trim().trim_matches('"').to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+    if !list.contains(&file) { list.push(file); }
+    list.sort();
+    std::fs::write(idx, format!("[{}]", list.iter().map(|x| format!("\"{x}\"")).collect::<Vec<_>>().join(","))).unwrap();
 }

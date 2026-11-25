@@ -3,3 +3,4 @@ target/
 results/
 web/parts.*
 web/k.wasm
+web/meshes/

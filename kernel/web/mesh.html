@@ -1,0 +1,124 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Kernel mesh viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1b1d21; color: #ddd; font: 13px system-ui, sans-serif; overflow: hidden }
+  canvas { display: block; width: 100%; height: 100% }
+  #ui { position: absolute; top: 10px; left: 10px; background: #000a; padding: 8px 10px; border-radius: 6px }
+  #ui select, #ui label { margin-right: 8px }
+  #info { margin-top: 6px; color: #aaa }
+</style>
+<canvas id="c"></canvas>
+<div id="ui">
+  <select id="file"></select>
+  <label><input type="checkbox" id="wire" checked> edges</label>
+  <label><input type="checkbox" id="faces" checked> face colours</label>
+  <div id="info">drag: rotate · shift+drag / right-drag: pan · wheel: zoom</div>
+</div>
+<script>
+// Minimal WebGL viewer for `brep mesh --out web/meshes` files (u32 nv, u32 nt, f32 xyz*nv, u32 3*nt, u32 face*nt).
+// Flat shading per triangle, one colour per B-rep face, optional triangle edges.
+const cv = document.getElementById('c'), gl = cv.getContext('webgl2', { antialias: true }) || null;
+const ctx2 = gl ? null : cv.getContext('2d');
+const info = document.getElementById('info'), sel = document.getElementById('file');
+const vs = `#version 300 es
+in vec3 p; in vec3 n; in vec3 col; uniform mat4 mvp; uniform mat3 nm; out vec3 vn; out vec3 vc;
+void main() { gl_Position = mvp * vec4(p, 1.0); vn = nm * n; vc = col; }`;
+const fs = `#version 300 es
+precision highp float; in vec3 vn; in vec3 vc; uniform float wire; out vec4 o;
+void main() { vec3 l = normalize(vec3(0.4, 0.6, 1.0)); float d = abs(dot(normalize(vn), l));
+  o = wire > 0.5 ? vec4(0.05, 0.05, 0.06, 1.0) : vec4(vc * (0.25 + 0.75 * d), 1.0); }`;
+const sh = !gl ? null : (t, s) => { const x = gl.createShader(t); gl.shaderSource(x, s); gl.compileShader(x); if (!gl.getShaderParameter(x, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(x); return x; };
+let prog = null;
+if (gl) { prog = gl.createProgram(); gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(prog); }
+const U = n => gl.getUniformLocation(prog, n);
+let mesh = null, rot = [0.6, -0.5], pan = [0, 0], dist = 2.5;
+
+function hue(i) { const h = (i * 0.61803398875) % 1, s = 0.45, v = 0.9; const k = n => (n + h * 6) % 6; const f = n => v - v * s * Math.max(0, Math.min(k(n), 4 - k(n), 1)); return [f(5), f(3), f(1)]; }
+
+async function load(name) {
+  const b = await (await fetch('meshes/' + name)).arrayBuffer(), dv = new DataView(b);
+  const nv = dv.getUint32(0, true), nt = dv.getUint32(4, true);
+  const P = new Float32Array(b, 8, nv * 3), T = new Uint32Array(b, 8 + nv * 12, nt * 3), F = new Uint32Array(b, 8 + nv * 12 + nt * 12, nt);
+  // unindexed flat-shaded triangles; edges as lines
+  const pos = new Float32Array(nt * 9), nor = new Float32Array(nt * 9), col = new Float32Array(nt * 9), lines = new Float32Array(nt * 18);
+  let lo = [1e30, 1e30, 1e30], hi = [-1e30, -1e30, -1e30];
+  for (let i = 0; i < nv; i++) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], P[3 * i + k]); hi[k] = Math.max(hi[k], P[3 * i + k]); }
+  const c = lo.map((x, k) => (x + hi[k]) / 2), s = 2 / Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  const v = i => [0, 1, 2].map(k => (P[3 * i + k] - c[k]) * s);
+  for (let t = 0; t < nt; t++) {
+    const a = v(T[3 * t]), b2 = v(T[3 * t + 1]), d = v(T[3 * t + 2]);
+    const u = [b2[0] - a[0], b2[1] - a[1], b2[2] - a[2]], w = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+    const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]], l = Math.hypot(...n) || 1;
+    const cc = hue(F[t]);
+    [a, b2, d].forEach((p, j) => { pos.set(p, 9 * t + 3 * j); nor.set(n.map(x => x / l), 9 * t + 3 * j); col.set(cc, 9 * t + 3 * j); });
+    [a, b2, b2, d, d, a].forEach((p, j) => lines.set(p, 18 * t + 3 * j));
+  }
+  if (!gl) { mesh = { pos, nor, col, nt }; info.textContent = `${name}: ${nv} vertices, ${nt} triangles, ${new Set(F).size} faces (2D canvas: no WebGL here)`; draw(); return; }
+  const buf = (data, loc, vao) => { const x = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, x); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); const L = gl.getAttribLocation(prog, loc); gl.enableVertexAttribArray(L); gl.vertexAttribPointer(L, 3, gl.FLOAT, false, 0, 0); };
+  const tv = gl.createVertexArray(); gl.bindVertexArray(tv); buf(pos, 'p'); buf(nor, 'n'); buf(col, 'col');
+  const lv = gl.createVertexArray(); gl.bindVertexArray(lv); buf(lines, 'p'); buf(new Float32Array(nt * 18), 'n'); buf(new Float32Array(nt * 18), 'col');
+  mesh = { tv, lv, nt };
+  info.textContent = `${name}: ${nv} vertices, ${nt} triangles, ${new Set(F).size} faces`;
+  draw();
+}
+
+function mul(a, b) { const r = new Float32Array(16); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k]; r[i * 4 + j] = s; } return r; }
+// Canvas-2D fallback: painter's algorithm over depth-sorted flat-shaded triangles
+function draw2d(R, V, w, h) {
+  const { pos, nor, col, nt } = mesh, f = 1 / Math.tan(0.4) * h / 2;
+  const tx = p => { const x = R[0] * p[0] + R[4] * p[1] + R[8] * p[2] + V[12], y = R[1] * p[0] + R[5] * p[1] + R[9] * p[2] + V[13], z = R[2] * p[0] + R[6] * p[1] + R[10] * p[2] + V[14]; return [w / 2 + f * x / -z, h / 2 - f * y / -z, z]; };
+  const P = new Float32Array(nt * 9);
+  for (let i = 0; i < nt * 3; i++) P.set(tx([pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]]), 3 * i);
+  const order = [...Array(nt).keys()].sort((a, b) => (P[9 * a + 2] + P[9 * a + 5] + P[9 * a + 8]) - (P[9 * b + 2] + P[9 * b + 5] + P[9 * b + 8]));
+  ctx2.fillStyle = '#1b1d21'; ctx2.fillRect(0, 0, w, h);
+  const faces = document.getElementById('faces').checked, wire = document.getElementById('wire').checked;
+  ctx2.lineWidth = 0.4;
+  for (const t of order) {
+    const nx = R[0] * nor[9 * t] + R[4] * nor[9 * t + 1] + R[8] * nor[9 * t + 2], ny = R[1] * nor[9 * t] + R[5] * nor[9 * t + 1] + R[9] * nor[9 * t + 2], nz = R[2] * nor[9 * t] + R[6] * nor[9 * t + 1] + R[10] * nor[9 * t + 2];
+    const d = 0.25 + 0.75 * Math.abs(0.4 * nx + 0.6 * ny + 1.0 * nz) / Math.hypot(0.4, 0.6, 1.0);
+    const c = faces ? [col[9 * t], col[9 * t + 1], col[9 * t + 2]] : [0.8, 0.8, 0.8];
+    ctx2.fillStyle = `rgb(${c.map(x => Math.round(255 * x * d)).join(',')})`;
+    ctx2.beginPath(); ctx2.moveTo(P[9 * t], P[9 * t + 1]); ctx2.lineTo(P[9 * t + 3], P[9 * t + 4]); ctx2.lineTo(P[9 * t + 6], P[9 * t + 7]); ctx2.closePath();
+    ctx2.fill();
+    if (wire) { ctx2.strokeStyle = '#111'; ctx2.stroke(); } else { ctx2.strokeStyle = ctx2.fillStyle; ctx2.stroke(); }
+  }
+}
+function draw() {
+  if (!mesh) return;
+  if (!gl) {
+    const w = cv.clientWidth * devicePixelRatio, h = cv.clientHeight * devicePixelRatio;
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    const [ax, ay] = rot, cx = Math.cos(ax), sx = Math.sin(ax), cy = Math.cos(ay), sy = Math.sin(ay);
+    draw2d([cy, sx * sy, -cx * sy, 0, 0, cx, sx, 0, sy, -sx * cy, cx * cy, 0, 0, 0, 0, 1], [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, pan[0], pan[1], -dist, 1], w, h);
+    return;
+  }
+  const w = cv.clientWidth * devicePixelRatio, h = cv.clientHeight * devicePixelRatio;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  gl.viewport(0, 0, w, h); gl.clearColor(0.106, 0.114, 0.129, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); gl.enable(gl.DEPTH_TEST);
+  const [ax, ay] = rot, cx = Math.cos(ax), sx = Math.sin(ax), cy = Math.cos(ay), sy = Math.sin(ay);
+  const R = new Float32Array([cy, sx * sy, -cx * sy, 0, 0, cx, sx, 0, sy, -sx * cy, cx * cy, 0, 0, 0, 0, 1]);
+  const V = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, pan[0], pan[1], -dist, 1]);
+  const f = 1 / Math.tan(0.4), a = w / h, nr = 0.01, fr = 100;
+  const Pm = new Float32Array([f / a, 0, 0, 0, 0, f, 0, 0, 0, 0, (fr + nr) / (nr - fr), -1, 0, 0, 2 * fr * nr / (nr - fr), 0]);
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(U('mvp'), false, mul(Pm, mul(V, R)));
+  gl.uniformMatrix3fv(U('nm'), false, new Float32Array([R[0], R[1], R[2], R[4], R[5], R[6], R[8], R[9], R[10]]));
+  gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1, 1);
+  gl.uniform1f(U('wire'), 0); gl.bindVertexArray(mesh.tv);
+  if (document.getElementById('faces').checked) gl.drawArrays(gl.TRIANGLES, 0, mesh.nt * 3);
+  else { gl.vertexAttrib3f(gl.getAttribLocation(prog, 'col'), 0.8, 0.8, 0.8); gl.drawArrays(gl.TRIANGLES, 0, mesh.nt * 3); }
+  if (document.getElementById('wire').checked) { gl.uniform1f(U('wire'), 1); gl.bindVertexArray(mesh.lv); gl.drawArrays(gl.LINES, 0, mesh.nt * 6); }
+}
+let drag = null;
+cv.oncontextmenu = e => e.preventDefault();
+cv.onpointerdown = e => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; cv.setPointerCapture(e.pointerId); };
+cv.onpointerup = () => drag = null;
+cv.onpointermove = e => { if (!drag) return; const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan) { pan[0] += dx * dist / 800; pan[1] -= dy * dist / 800; } else { rot[1] += dx / 200; rot[0] += dy / 200; } draw(); };
+cv.onwheel = e => { e.preventDefault(); dist *= Math.exp(e.deltaY / 500); draw(); };
+onresize = draw;
+document.getElementById('wire').onchange = draw; document.getElementById('faces').onchange = draw;
+sel.onchange = () => load(sel.value);
+fetch('meshes/index.json').then(r => r.json()).then(list => { for (const n of list) sel.add(new Option(n, n)); const q = new URLSearchParams(location.search).get('m'); if (q) sel.value = q; load(sel.value); });
+</script>
