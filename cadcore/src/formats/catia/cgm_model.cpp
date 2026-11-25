@@ -131,7 +131,7 @@ private:
     std::uint32_t surface(std::uint32_t id) {
         if (auto it = surface_.find(id); it != surface_.end()) return it->second;
         const Obj& o = obj(id);
-        if (o.type == 212 || o.type == 241) {
+        if (o.type == 212 || o.type == 241 || o.type == 242 || o.type == 244) {
             const std::uint32_t r = surface(first(o));
             surface_[id] = r;
             return r;

@@ -32,7 +32,8 @@
 //     203 sphere   o A B C (axes times r) r ...          angles u / r, v / r
 //     204 torus    o X Y Z R r ...                       angles u / R, v / r
 //     231 NURBS    knot vectors u, v; i16 rational; poles (v fastest); [weights]
-//     212, 241     refs[0] is the carrier surface (241: fillet whose carrier kind is its first i16)
+//     212, 241, 242, 244 refs[0] is the carrier, with its parameters (241, 244: fillets whose first
+//                  i16 names the carrier kind; 242: the carrier with a parameter box)
 //   p-curves (refs: the surface)
 //     150 line     o d t0 t1 (6 f64), or o, unused, d, t0, t1, scale (8 f64)
 //     151 circle   c, i32 i32, r, t0, t1, s [, ref]      angle = t / (r s)
