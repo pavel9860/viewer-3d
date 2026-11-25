@@ -4,7 +4,9 @@ out=[]
 for l in open('cgmindex.tsv').read().splitlines():
   h=l.split('\t')[0]; s=open('cgm2/'+h+'.cgm','rb').read()
   if not old.old_records(s): continue
-  o=geo.parse(s); C=geo.Ctx(o)
+  try: o=geo.parse(s)
+  except Exception: continue
+  C=geo.Ctx(o)
   def carrier(sid):
     while o[sid][0] in (241,212): sid=o[sid][1][0]
     return sid
@@ -12,15 +14,19 @@ for l in open('cgmindex.tsv').read().splitlines():
     if t!=14: continue
     e=refs[0]
     if o[e][0] not in (191,192,193): continue
-    q=C.point14(i)[0][1]; m,_,_=ec.parse_ec(o[e][1],o[e][2]); P=None; tgt=None
+    try: q=C.point14(i)[0][1]; m,_,_=ec.parse_ec(o[e][1],o[e][2])
+    except Exception: continue
+    P=None; tgt=None
     for cc,mp in zip(o[e][1],m):
       tc,cr,cp,_=o[cc]
       if not cr or tc not in (150,151,160): continue
       sid=cr[0]; car=carrier(sid)
-      if o[car][0]==T: tgt=(car,C.pcurve(cc)[1](mp(q)))
-      elif o[car][0] in (200,201,231):
-        S=C.surf(sid)
-        if S: P=S(*C.pcurve(cc)[1](mp(q)))
+      try:
+        if o[car][0]==T: tgt=(car,C.pcurve(cc)[1](mp(q)))
+        elif o[car][0] in (200,201,231):
+          S=C.surf(sid)
+          if S: P=S(*C.pcurve(cc)[1](mp(q)))
+      except Exception: pass
     if P and tgt: out.append((h,tgt[0],tgt[1],P,geo.D(o[tgt[0]][2],0,len(o[tgt[0]][2])//8)))
     if len(out)>=N: break
   if len(out)>=N: break

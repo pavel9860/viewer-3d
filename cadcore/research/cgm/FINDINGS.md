@@ -46,3 +46,25 @@ compact dialect bodies (56 B-rep-only parts); fixed dialect framing (30); sheet-
 - B-rep-only: 134 closed solids, 21 open (216 fillet, 155 composite p-curve, 211, 251, 152, 170),
   71 without a solid (surface parts; sheets not shown), 90 not meshed (compact dialect 55, fixed
   dialect 28, no CGM stream located 5, damaged store 2).
+
+## Compact dialect bodies (2011+), in progress
+Spike: `spike/cpt.py` (records, ids), `cgraph.py` (reference graph), `pairs.py` / `pairs2.py`
+(old <-> compact record pairs of the same part saved by two releases).
+- Signed integer (ids, references, small fields): first byte b, low 2 bits:
+  01 -> +(b >> 2); 11 -> -((b >> 2) + 1); 00 -> (b >> 2) bytes follow, little-endian, positive;
+  10 -> the same, negative (-v - 1).
+- Record ids: the id field holds the delta from the previous record's id (1 = `05`); monotone in
+  940 of 957 streams (17 to check); 91 id fields carry extra bytes after the delta.
+- References: the signed difference self - target (`03` = next record, `05` = previous).
+- Variable-length reference lists keep a varint count (0x80 | n); fixed-arity records omit it.
+- Two families. Levels 79/80 (2011Spring): ids equal the old releases' ids, so 14 parts pair
+  record by record with their V5R15-R17 saves (`pairs.pkl`). Levels 74-78, 81 (2012-2017, all of the
+  user's own parts): ids renumbered and records reordered, pairing needs content matching.
+- 2011Spring findings: edge (94) = v0, v1, p0, p1 references + flag (its edge curve is dropped;
+  the edge curve (36) gains a reference to its edge after its p-curve list); vertex (93) = one
+  reference + flag; point (6) = count + references, then per curve f64 parameter and a small int
+  (the old i32); line p-curve (24) = surface reference, form int (0 general: 6 f64; 1 vertical:
+  x t0 t1; 2 horizontal: y t0 t1); edge-curve maps: flag as small int, zero tolerances and the
+  4 closing bytes dropped.
+- 2012+: line p-curves use other form codes (1, 2, 8, 13, 72, 136, ...) with 0-5 f64; point
+  parameters that equal a curve end become 1-byte codes (0x84 / 0x88 seen).

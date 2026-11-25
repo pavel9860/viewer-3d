@@ -32,7 +32,7 @@ class Ctx:
         th=u/(r*v[14])
         return add(o,add(mul(X,r*math.cos(th)),add(mul(Y,r*math.sin(th)),mul(Z,w))))
       return f
-    if t==241:
+    if t in (241,244,242):
       return s.surf(refs[0])
     if t==203:
       v=D(p,0,len(p)//8); o,A,B,Cz=v[0:3],v[3:6],v[6:9],v[9:12]; rs=v[12]
@@ -48,6 +48,24 @@ class Ctx:
         cu,su,cw,sw=math.cos(u),math.sin(u),math.cos(w),math.sin(w); q=R+r*cw
         return [o[k]+q*(cu*X[k]+su*Y[k])+r*sw*Z[k] for k in range(3)]
       return f
+    if t==210:
+      v=D(p,0,9); Dv=v[0:3]
+      c=s.o[refs[0]]
+      if c[0] in (150,151,160):
+        sid,f=s.pcurve(refs[0]); S=s.surf(sid)
+        if not S: return None
+        def g(u,w): P=S(*f(u)); return [P[k]+w*Dv[k] for k in range(3)]
+        return g
+      return None
+    if t==214:
+      B=s.surf(refs[1]); d=D(p,0)[0]*(-1)
+      if not B: return None
+      def g(u,w):
+        h=1e-6*(1+abs(u)+abs(w)); P=B(u,w)
+        du=[(x-y)/(2*h) for x,y in zip(B(u+h,w),B(u-h,w))]; dv=[(x-y)/(2*h) for x,y in zip(B(u,w+h),B(u,w-h))]
+        n=[du[1]*dv[2]-du[2]*dv[1],du[2]*dv[0]-du[0]*dv[2],du[0]*dv[1]-du[1]*dv[0]]; L=math.sqrt(sum(x*x for x in n)) or 1
+        return [P[k]+d*n[k]/L for k in range(3)]
+      return g
     if t==212:
       return s.surf(refs[0])
     if t==231:
@@ -102,7 +120,7 @@ def check2(objs):
       pts.append((tc,objs[sid][0],S(*f(qq))))
     if len(pts)>=2:
       d=max(math.dist(a[2],b[2]) for a in pts for b in pts)
-      key=(objs[ec][0],)+tuple(sorted(set((a[0],a[1]) for a in pts)))
+      key=(objs[ec][0],)+tuple(sorted(set((a[0],a[1]) for a in pts)))+tuple(sorted(set(objs[objs[c][1][0]][0] for c in objs[ec][1] if objs[c][1] and objs[objs[c][1][0]][0]==214 for _ in [0]) ))+tuple(sorted(set(objs[objs[objs[c][1][0]][1][0]][0] for c in objs[ec][1] if objs[c][1] and objs[objs[c][1][0]][0]==214)))
       st[('ok' if d<1e-3 else 'bad',key)]+=1
       if d>=1e-3 and len(worst)<5: worst.append((i,d,pts))
   return st,worst
