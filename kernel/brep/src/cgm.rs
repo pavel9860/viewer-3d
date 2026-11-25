@@ -97,8 +97,11 @@ impl Surf for CgmTorus {
 
 pub struct Coedge { pub pcurve: usize, pub edge: usize, pub sense: i32, pub t: [f64; 2] }
 pub struct Face { pub surface: usize, pub sense: i32, pub loops: Vec<std::ops::Range<usize>>, pub id: u32 }
-/// `body`: the owning CGM body record (0 if none); `solid`: bounds a volume; `root`: its body is a root of the stream; otherwise a sheet (open surfaces, reference planes)
-pub struct Shell { pub id: u32, pub body: u32, pub solid: bool, pub root: bool, pub faces: Vec<(usize, i32)> }
+/// `solid`: bounds a volume; otherwise a sheet (open surfaces, reference planes)
+pub struct Shell { pub id: u32, pub solid: bool, pub faces: Vec<(usize, i32)> }
+/// a CGM body (versions of a body share unchanged shells); `flags` bit 0: named by the stream
+/// header's roots, bit 1 + j: listed in list j of the part's CATSeeBodyCont
+pub struct Body { pub id: u32, pub flags: u32, pub shells: Vec<usize> }
 pub struct Skip { pub id: u32, pub kind: u32, pub why: String }
 
 /// the B-rep of one part
@@ -112,6 +115,7 @@ pub struct Model {
     pub coedges: Vec<Coedge>,
     pub faces: Vec<Face>,
     pub shells: Vec<Shell>,
+    pub bodies: Vec<Body>,
     pub skipped: Vec<Skip>,
 }
 
@@ -182,10 +186,10 @@ fn pcurve(kind: u32, p: &[f64]) -> Result<PCurve, String> {
 
 impl Model {
     pub fn read(b: &[u8]) -> Result<Model, String> {
-        if b.len() < 8 || &b[..8] != b"CGMIR\0\0\x01" { return Err("not a CGM IR (version 1)".into()); }
+        if b.len() < 8 || &b[..8] != b"CGMIR\0\0\x02" { return Err("not a CGM IR (version 2)".into()); }
         let mut r = Rd { b, k: 8 };
-        let c: Vec<usize> = (0..9).map(|_| r.n()).collect::<Result<_, _>>()?;
-        let mut m = Model { surfaces: vec![], pcurves: vec![], vertices: c[2], edges: vec![], coedges: vec![], faces: vec![], shells: vec![], skipped: vec![] };
+        let c: Vec<usize> = (0..10).map(|_| r.n()).collect::<Result<_, _>>()?;
+        let mut m = Model { surfaces: vec![], pcurves: vec![], vertices: c[2], edges: vec![], coedges: vec![], faces: vec![], shells: vec![], bodies: vec![], skipped: vec![] };
         for _ in 0..c[0] { let (kind, _id, n) = (r.u32()?, r.u32()?, r.n()?); let p = r.f64s(n)?; m.surfaces.push(surface(kind, &p)?); }
         for _ in 0..c[1] { let (kind, s, _id, n) = (r.u32()?, r.n()?, r.u32()?, r.n()?); let p = r.f64s(n)?; if s >= m.surfaces.len() { return Err("p-curve surface out of range".into()); } m.pcurves.push((s, pcurve(kind, &p)?)); }
         for _ in 0..c[3] { let (a, b, _id) = (r.n()?, r.n()?, r.u32()?); if a >= m.vertices || b >= m.vertices { return Err("edge vertex out of range".into()); } m.edges.push([a, b]); }
@@ -202,12 +206,16 @@ impl Model {
             m.faces.push(Face { surface: s, sense, loops: loops[l0..l0 + nl].to_vec(), id });
         }
         for _ in 0..c[7] {
-            let (id, body, flags, n) = (r.u32()?, r.u32()?, r.u32()?, r.n()?);
-            let (solid, root) = (flags & 1 != 0, flags & 2 != 0);
+            let (id, solid, n) = (r.u32()?, r.u32()? & 1 != 0, r.n()?);
             let faces = (0..n).map(|_| { let (f, s) = (r.n()?, r.i32()?); if f >= m.faces.len() { Err("shell face out of range".to_string()) } else { Ok((f, s)) } }).collect::<Result<_, _>>()?;
-            m.shells.push(Shell { id, body, solid, root, faces });
+            m.shells.push(Shell { id, solid, faces });
         }
-        for _ in 0..c[8] { let (id, kind, n) = (r.u32()?, r.u32()?, r.n()?); let why = String::from_utf8_lossy(r.take(n)?).into_owned(); m.skipped.push(Skip { id, kind, why }); }
+        for _ in 0..c[8] {
+            let (id, flags, n) = (r.u32()?, r.u32()?, r.n()?);
+            let shells = (0..n).map(|_| { let i = r.n()?; if i >= m.shells.len() { Err("body shell out of range".to_string()) } else { Ok(i) } }).collect::<Result<_, _>>()?;
+            m.bodies.push(Body { id, flags, shells });
+        }
+        for _ in 0..c[9] { let (id, kind, n) = (r.u32()?, r.u32()?, r.n()?); let why = String::from_utf8_lossy(r.take(n)?).into_owned(); m.skipped.push(Skip { id, kind, why }); }
         if r.k != b.len() { return Err(format!("{} bytes after the IR", b.len() - r.k)); }
         Ok(m)
     }

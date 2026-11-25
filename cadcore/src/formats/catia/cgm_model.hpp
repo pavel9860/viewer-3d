@@ -67,7 +67,7 @@ struct Ir {
     struct Coedge { std::uint32_t pcurve = 0, edge = 0; std::int32_t sense = 1; double t0 = 0, t1 = 0; };
     struct Loop { std::uint32_t first = 0, count = 0; };
     struct Face { std::uint32_t surface = 0; std::int32_t sense = 1; std::uint32_t first_loop = 0, loops = 0, id = 0; };
-    struct Shell { std::uint32_t id = 0, body = 0; bool solid = false, root = false; std::vector<std::uint32_t> faces; std::vector<std::int32_t> senses; };  // solid: bounds a volume (513)
+    struct Shell { std::uint32_t id = 0; bool solid = false; std::vector<std::uint32_t> faces; std::vector<std::int32_t> senses; };  // solid: bounds a volume (513)
     struct Skip { std::uint32_t id = 0, type = 0; std::string why; };  // a face (or shell) left out
 
     std::vector<Surface> surfaces;
@@ -78,19 +78,24 @@ struct Ir {
     std::vector<Loop> loops;
     std::vector<Face> faces;
     std::vector<Shell> shells;
+    // a CGM body (500): its shells (indices into `shells`); flags bit 0: named by the stream header's
+    // roots; bit 1 + j: listed in list j of the part's CATSeeBodyCont
+    struct Body { std::uint32_t id = 0, flags = 0; std::vector<std::uint32_t> shells; };
+    std::vector<Body> bodies;
     std::vector<Skip> skipped;
 };
 
 // The B-rep of a framed varint-dialect stream. Faces whose geometry or grammar is not decoded are
 // left out and listed in `skipped` with the reason. Throws Unsupported for other dialects.
-Ir decode(const Stream& stream);
+Ir decode(const Stream& stream, const std::vector<std::vector<std::uint32_t>>& visible = {});
 
 // Binary IR (little-endian):
-//   "CGMIR\0\0\1", u32 surfaces pcurves vertices edges coedges loops faces shells skipped,
+//   "CGMIR\0\0\2", u32 surfaces pcurves vertices edges coedges loops faces shells bodies skipped,
 //   surfaces { u32 kind id n, f64[n] }, pcurves { u32 kind surface id n, f64[n] },
 //   edges { u32 v0 v1 id }, coedges { u32 pcurve edge, i32 sense, u32 0, f64 t0 t1 },
 //   loops { u32 first count }, faces { u32 surface, i32 sense, u32 first_loop loops id },
-//   shells { u32 id body flags (1 solid, 2 body named by the header's roots) n, n x (u32 face, i32 sense) }  (body: owning 500 record, 0 if none), skipped { u32 id type n, char[n] }.
+//   shells { u32 id solid n, n x (u32 face, i32 sense) }, bodies { u32 id flags n, u32 shell[n] },
+//   skipped { u32 id type n, char[n] }.
 std::vector<std::uint8_t> serialize(const Ir& ir);
 
 }  // namespace cadcore::formats::catia::cgm

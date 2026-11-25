@@ -65,7 +65,7 @@ KnotVector knot_vector(Rd& r) {
 
 class Decoder {
 public:
-    Decoder(const Stream& s) : s_(s) {
+    Decoder(const Stream& s, std::vector<std::vector<std::uint32_t>> visible) : s_(s), visible_(std::move(visible)) {
         for (const Record& rec : s.records) {
             Obj o;
             o.type = rec.type;
@@ -83,30 +83,38 @@ public:
         for (const Record& rec : s_.records)
             if (rec.type == 513)
                 for (std::uint32_t r : obj(rec.id).refs) solid_.insert(r);
-        // owning body (500) of each shell: 500 -> 520, or 500 -> 525 -> 513 -> 520
-        std::unordered_map<std::uint32_t, std::uint32_t> up;
-        for (const Record& rec : s_.records)
-            if (rec.type == 500 || rec.type == 525 || rec.type == 513)
-                for (std::uint32_t r : obj(rec.id).refs) up.emplace(r, rec.id);
-        for (const Record& rec : s_.records)
-            if (rec.type == 520) {
-                std::uint32_t x = rec.id;
-                for (int d = 0; d < 4 && up.count(x); ++d) x = up[x];
-                if (x != rec.id && obj(x).type == 500) body_[rec.id] = x;
-            }
         for (const Record& rec : s_.records)
             if (rec.type == 520) shell(rec.id);
+        // bodies: 500 -> 520 (sheets), 500 -> 525 -> 513 -> 520 (solids); versions of a body share
+        // their unchanged shells, so a shell can belong to several bodies
+        for (const Record& rec : s_.records) {
+            if (rec.type != 500) continue;
+            Ir::Body bd;
+            bd.id = rec.id;
+            std::vector<std::uint32_t> todo = obj(rec.id).refs;
+            for (std::size_t i = 0; i < todo.size() && i < 100000; ++i) {
+                const Obj& o = obj(todo[i]);
+                if (o.type == 525 || o.type == 513) todo.insert(todo.end(), o.refs.begin(), o.refs.end());
+                if (o.type == 520)
+                    if (auto it = shell_.find(todo[i]); it != shell_.end() && std::find(bd.shells.begin(), bd.shells.end(), it->second) == bd.shells.end()) bd.shells.push_back(it->second);
+            }
+            if (std::find(s_.roots.begin(), s_.roots.end(), rec.id) != s_.roots.end()) bd.flags |= 1;
+            for (std::size_t j = 0; j < visible_.size() && j < 30; ++j)
+                if (std::find(visible_[j].begin(), visible_[j].end(), rec.id) != visible_[j].end()) bd.flags |= 2u << j;
+            out_.bodies.push_back(std::move(bd));
+        }
         out_.vertices = std::uint32_t(vertex_.size());
         return std::move(out_);
     }
 
 private:
     const Stream& s_;
+    std::vector<std::vector<std::uint32_t>> visible_;
     std::unordered_map<std::uint32_t, Obj> objs_;
     std::unordered_map<std::uint32_t, std::uint32_t> surface_, pcurve_, edge_, vertex_;
     std::unordered_map<std::uint32_t, std::optional<std::uint32_t>> face_;
     std::unordered_set<std::uint32_t> solid_;
-    std::unordered_map<std::uint32_t, std::uint32_t> body_;
+    std::unordered_map<std::uint32_t, std::uint32_t> shell_;
     Ir out_;
 
     const Obj& obj(std::uint32_t id) const {
@@ -386,8 +394,6 @@ private:
         Ir::Shell sh;
         sh.id = id;
         sh.solid = solid_.count(id) != 0;
-        if (auto it = body_.find(id); it != body_.end()) sh.body = it->second;
-        sh.root = std::find(s_.roots.begin(), s_.roots.end(), sh.body) != s_.roots.end();
         try {
             const std::uint32_t n = r.var();
             if (n != s.refs.size()) bad("shell count differs from its faces", s.at);
@@ -402,6 +408,7 @@ private:
             out_.skipped.push_back({id, 520, e.what()});
             return;
         }
+        shell_[id] = std::uint32_t(out_.shells.size());
         out_.shells.push_back(std::move(sh));
     }
 };
@@ -415,23 +422,24 @@ struct Out {
 
 }  // namespace
 
-Ir decode(const Stream& stream) {
-    if (stream.dialect != Dialect::Varint) throw DecodeError(ErrorCode::Unsupported, std::string("CGM ") + dialect_name(stream.dialect) + " dialect bodies not decoded", 0);
-    return Decoder(stream).run();
+Ir decode(const Stream& stream, const std::vector<std::vector<std::uint32_t>>& visible) {
+    if (!stream.varint_bodies) throw DecodeError(ErrorCode::Unsupported, std::string("CGM ") + dialect_name(stream.dialect) + " dialect bodies of level " + std::to_string(stream.level) + " not decoded", 0);
+    return Decoder(stream, visible).run();
 }
 
 std::vector<std::uint8_t> serialize(const Ir& ir) {
     Out o;
-    const char magic[8] = {'C', 'G', 'M', 'I', 'R', 0, 0, 1};
+    const char magic[8] = {'C', 'G', 'M', 'I', 'R', 0, 0, 2};
     o.b.assign(magic, magic + 8);
-    for (std::size_t n : {ir.surfaces.size(), ir.pcurves.size(), std::size_t(ir.vertices), ir.edges.size(), ir.coedges.size(), ir.loops.size(), ir.faces.size(), ir.shells.size(), ir.skipped.size()}) o.u32(std::uint32_t(n));
+    for (std::size_t n : {ir.surfaces.size(), ir.pcurves.size(), std::size_t(ir.vertices), ir.edges.size(), ir.coedges.size(), ir.loops.size(), ir.faces.size(), ir.shells.size(), ir.bodies.size(), ir.skipped.size()}) o.u32(std::uint32_t(n));
     for (const auto& s : ir.surfaces) { o.u32(s.kind); o.u32(s.id); o.u32(std::uint32_t(s.p.size())); for (double d : s.p) o.f64(d); }
     for (const auto& c : ir.pcurves) { o.u32(c.kind); o.u32(c.surface); o.u32(c.id); o.u32(std::uint32_t(c.p.size())); for (double d : c.p) o.f64(d); }
     for (const auto& e : ir.edges) { o.u32(e.v0); o.u32(e.v1); o.u32(e.id); }
     for (const auto& c : ir.coedges) { o.u32(c.pcurve); o.u32(c.edge); o.i32(c.sense); o.u32(0); o.f64(c.t0); o.f64(c.t1); }
     for (const auto& l : ir.loops) { o.u32(l.first); o.u32(l.count); }
     for (const auto& f : ir.faces) { o.u32(f.surface); o.i32(f.sense); o.u32(f.first_loop); o.u32(f.loops); o.u32(f.id); }
-    for (const auto& s : ir.shells) { o.u32(s.id); o.u32(s.body); o.u32((s.solid ? 1u : 0u) | (s.root ? 2u : 0u)); o.u32(std::uint32_t(s.faces.size())); for (std::size_t i = 0; i < s.faces.size(); ++i) { o.u32(s.faces[i]); o.i32(s.senses[i]); } }
+    for (const auto& s : ir.shells) { o.u32(s.id); o.u32(s.solid ? 1u : 0u); o.u32(std::uint32_t(s.faces.size())); for (std::size_t i = 0; i < s.faces.size(); ++i) { o.u32(s.faces[i]); o.i32(s.senses[i]); } }
+    for (const auto& b : ir.bodies) { o.u32(b.id); o.u32(b.flags); o.u32(std::uint32_t(b.shells.size())); for (auto i : b.shells) o.u32(i); }
     for (const auto& k : ir.skipped) { o.u32(k.id); o.u32(k.type); o.u32(std::uint32_t(k.why.size())); o.b.insert(o.b.end(), k.why.begin(), k.why.end()); }
     return o.b;
 }

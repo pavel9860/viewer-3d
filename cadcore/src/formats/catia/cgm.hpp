@@ -16,7 +16,10 @@
 //   compact (2009Fall and later): directory  a8 06 7a u32 level u32 size, then records
 //           u8 marker  u8 flags  u8 type  length  id-field  body[length]
 //           marker high nibble b -> 1-byte length, a -> 4-byte length; low nibble = length width +
-//           id-field width. Type numbers are per file; bodies are not decoded yet.
+//           id-field width. Type codes are one fixed enumeration (cgm.cpp, compact_class: mapped
+//           from the reference graph of the 65 2009Fall streams, ids absolute u32). Bodies are
+//           not decoded yet: 2009Fall (levels 83..85) keeps varint reference lists but packs the
+//           other fields (1-byte flags, masked doubles); later levels (74..81) pack further.
 //   fixed   (CXR4/5, CGA-V2R4): fixed-width records  u32 id  u16 type  b3 00 ...; recognised
 //           but not framed yet (the header's padding before the length varies).
 //
@@ -38,8 +41,9 @@ enum class Dialect { Varint, Compact, Fixed };
 const char* dialect_name(Dialect d);
 
 struct Record {
-    std::uint32_t id = 0;      // varint/fixed: object id; compact: the id field as read
-    std::uint16_t type = 0;    // varint/fixed: class number; compact: per-file type byte
+    std::uint32_t id = 0;      // object id (compact: the id field, absolute when 4 bytes wide)
+    std::uint16_t type = 0;    // class number (compact: from its type code, 0 when not mapped)
+    std::uint8_t code = 0;     // compact: the type code as written
     std::uint8_t flags = 0;
     std::size_t offset = 0;    // of the record header in the stream
     ByteView body;
@@ -50,6 +54,7 @@ struct Stream {
     bool big = false;            // byte order of fixed-width fields
     std::string version;         // first version string of the header
     std::uint32_t level = 0;     // directory level
+    bool varint_bodies = true;   // record bodies use the varint-dialect body grammar
     std::vector<std::uint32_t> roots;  // varint dialect: root object ids named by the header
     std::vector<Record> records;
     std::size_t end = 0;         // first byte after the records (start of the trailer)
@@ -57,6 +62,11 @@ struct Stream {
 
 // The CGMGeom stream of a V5 store; nullopt when the document has none.
 std::optional<std::vector<std::uint8_t>> find_stream(ByteView file);
+
+// The id lists of the part's CATSeeBodyCont container (body records of the CGM stream): a sequence of
+// u32 n, n x u32 id (3 or 5 lists in all 1,500 parts of the corpus that have one), in the Data
+// stream's byte order. Empty when the part has none; throws DecodeError when the lists do not fill it.
+std::vector<std::vector<std::uint32_t>> see_body_lists(ByteView file);
 
 // Splits a CGM stream into records. Throws DecodeError when the stream fits no dialect or a
 // record does not chain to the directory's size, and Unsupported for the fixed dialect (dialect

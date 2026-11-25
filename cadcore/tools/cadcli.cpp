@@ -707,11 +707,14 @@ static int cmd_cgm(int argc, char** argv) {
         const auto st = cgm::find_stream(ByteView(bytes.data(), bytes.size()));
         if (!st) { std::printf("{\"file\":\"%s\",\"cgm\":false}\n", argv[2]); return 0; }
         const cgm::Stream s = cgm::frame(ByteView(st->data(), st->size()));
-        const cgm::Ir ir = cgm::decode(s);
+        std::vector<std::vector<std::uint32_t>> shown;
+        std::string shown_error;
+        try { shown = cgm::see_body_lists(ByteView(bytes.data(), bytes.size())); } catch (const DecodeError& e) { shown_error = e.what(); }
+        const cgm::Ir ir = cgm::decode(s, shown);
         std::size_t want = 0;
         for (const auto& r : s.records) want += r.type == 512;
-        std::printf("{\"file\":\"%s\",\"dialect\":\"%s\",\"version\":\"%s\",\"records\":%zu,\"faces\":%zu,\"faces_decoded\":%zu,\"shells\":%zu,\"surfaces\":%zu,\"pcurves\":%zu,\"edges\":%zu,\"skipped\":[",
-                    argv[2], cgm::dialect_name(s.dialect), s.version.c_str(), s.records.size(), want, ir.faces.size(), ir.shells.size(), ir.surfaces.size(), ir.pcurves.size(), ir.edges.size());
+        std::printf("{\"file\":\"%s\",\"dialect\":\"%s\",\"version\":\"%s\",\"records\":%zu,\"faces\":%zu,\"faces_decoded\":%zu,\"shells\":%zu,\"surfaces\":%zu,\"pcurves\":%zu,\"edges\":%zu,\"see_body\":\"%s\",\"skipped\":[",
+                    argv[2], cgm::dialect_name(s.dialect), s.version.c_str(), s.records.size(), want, ir.faces.size(), ir.shells.size(), ir.surfaces.size(), ir.pcurves.size(), ir.edges.size(), shown_error.empty() ? (shown.empty() ? "none" : "ok") : "malformed");
         for (std::size_t i = 0; i < ir.skipped.size(); ++i) {
             std::string why = ir.skipped[i].why;
             for (char& c : why) if (c == '"' || c == '\\') c = '\'';

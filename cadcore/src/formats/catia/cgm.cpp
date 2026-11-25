@@ -47,10 +47,28 @@ void frame_varint(ByteView s, std::size_t dir, bool big, Stream& out) {
     out.end = end;
 }
 
+// Class number of a compact type code; 0 when not established. Mapped from the reference graph
+// (which codes each code's records reference, at which positions) and the payload lengths of the
+// 65 2009Fall streams, whose reference lists still use the varint encoding (FINDINGS.md).
+std::uint16_t compact_class(std::uint8_t code) {
+    switch (code) {
+        case 5: return 13;    case 6: return 14;
+        case 24: return 150;  case 25: return 151;  case 32: return 160;
+        case 35: return 193;  case 36: return 192;  case 37: return 191;
+        case 39: return 200;  case 40: return 201;  case 42: return 203;  case 43: return 204;
+        case 46: return 212;  case 52: return 231;  case 55: return 241;
+        case 91: return 500;  case 92: return 502;  case 93: return 510;  case 94: return 511;
+        case 95: return 512;  case 96: return 513;  case 97: return 520;  case 98: return 521;
+        case 100: return 524; case 101: return 525;
+        default: return 0;
+    }
+}
+
 // compact dialect: directory a8 06 7a u32 level u32 size at `dir`.
 void frame_compact(ByteView s, std::size_t dir, Stream& out) {
     out.dialect = Dialect::Compact;
     out.level = load_u32(s.data + dir + 3, false);
+    out.varint_bodies = false;
     const std::size_t size = load_u32(s.data + dir + 7, false);
     std::size_t k = dir + 11;
     const std::size_t end = k + size;
@@ -64,7 +82,8 @@ void frame_compact(ByteView s, std::size_t dir, Stream& out) {
         Record r;
         r.offset = k;
         r.flags = s[k + 1];
-        r.type = s[k + 2];
+        r.code = s[k + 2];
+        r.type = compact_class(r.code);
         std::size_t len = 0;
         for (unsigned i = 0; i < lw; ++i) len |= std::size_t(s[k + 3 + i]) << (8 * i);
         for (unsigned i = 0; i < iw && i < 4; ++i) r.id |= std::uint32_t(s[k + 3 + lw + i]) << (8 * i);
@@ -106,6 +125,34 @@ std::optional<std::vector<std::uint8_t>> find_stream(ByteView file) {
         }
     }
     return std::nullopt;
+}
+
+std::vector<std::vector<std::uint32_t>> see_body_lists(ByteView file) {
+    std::vector<std::vector<std::uint32_t>> out;
+    const auto data = read_data_stream(file);
+    if (!data) return out;
+    for (const DataSection& sec : data->sections) {
+        if (sec.cls != "CATSeeBodyCont") continue;
+        for (const DataItem& it : sec.items) {
+            if (it.tag != 3 || it.body.size < 16) continue;
+            const Store store = read_store(file);
+            const StreamInfo* st = store.find(hex_name(it.body.data));
+            if (!st) continue;
+            const auto b = read_stream(file, store, *st);
+            std::vector<std::vector<std::uint32_t>> lists;
+            for (std::size_t k = 0; k < b.size();) {
+                if (k + 4 > b.size()) bad("CATSeeBodyCont: list count past the end", k);
+                const std::size_t n = load_u32(b.data() + k, data->big);
+                k += 4;
+                if (n > (b.size() - k) / 4) bad("CATSeeBodyCont: list past the end", k);
+                std::vector<std::uint32_t> l(n);
+                for (auto& x : l) { x = load_u32(b.data() + k, data->big); k += 4; }
+                lists.push_back(std::move(l));
+            }
+            return lists;
+        }
+    }
+    return out;
 }
 
 std::uint32_t varint(ByteView b, std::size_t& k) {
