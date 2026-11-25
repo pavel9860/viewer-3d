@@ -77,3 +77,38 @@ Spike: `spike/cpt.py` (records, ids), `cgraph.py` (reference graph), `pairs.py` 
   bit 7: d = (-1, 0); bit 3: symmetric range, only t0 stored (t1 = -t0); with no direction bit
   the direction is stored. Bits 2 and 4 make values derived, not stored (form 6 keeps only the
   range length pi/4; form 17 stores 1.646, 2.646 for o.y 1.646, range [0, 0.785]); not solved.
+
+## Status 2026-11-25 (compact bodies, 2011Spring family decoded)
+Implemented: `cgm_compact.{hpp,cpp}` (compact record -> canonical varint-dialect record; grammar in
+its header), `compact_layout`, compact ids delta-decoded in `frame`, `Stream.features`; the decoder
+runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
+- The stream header's bytes after the second version string are per-file features, not the
+  directory level: `bf 77`, `b5 77`, `b5 75` (2011Spring), `06 b5 75 ..` (2011Fall), `08 b5 75 ..`
+  (2012-2022, GUIDs follow). Byte 0 bit 3: small integers as compact signed integers (else raw
+  i16 / i32 of the varint dialect); byte 1 bit 1: edges drop their edge-curve reference.
+- Only `bf 77` parts have old twins (14, id-paired): every paired record of the decoded classes
+  transcodes byte-exact (topology, points, edge curves, lines, circles, Hermite, planes,
+  cylinders, cones, spheres, tori). `b5 75` / `b5 77`: grammar-exact over the corpus.
+- Class codes (from reference arity vs the old classes): 2 = 10, 4 = 12, 14 = 100, 26 = 152,
+  29 = 155, 35 = 191 (not 193), 37 = 193, 41 = 202, 44 = 210, 45 = 211, 46 = 212, 48 = 214,
+  50 = 216, 52 = 231, 55 = 241, 56 = 242, 57 = 243, 59 = 244, 64 = 251.
+- Knot vectors: deg, n, form byte (4: field x = 0; 0: x follows), knots, 1 = standard
+  multiplicities (ends deg + 1, interior deg - 2: holds for every NURBS of degree 3 and 5 and the
+  quintic Hermite curves). NURBS: then rational, poles, weights, a 152/154-byte block.
+- Objects of one class can use two layouts in one file (circles with / without the two i32;
+  edge-curve map 1 with / without its identity range): the record length decides, exactly one
+  layout fits every instance. Edge curves may list their curves twice (A B A B, header 08, 264
+  records): the second copy shares the maps. Loop blocks follow any non-zero closing i16 (1 in
+  compact streams, 3 in the varint dialect).
+- Results (292 2011Spring compact parts): 82,509 of 86,340 faces decode (95.6%); the rest are
+  classes the varint-dialect decoder lacks too (216, 211, 243 surfaces; 152, 155, 170 p-curves;
+  codes 33, 28, 22, 16). vs stored tessellation: 209 complete parts, 120 closed within 1%, 54 more
+  within 5%. Old dialect unchanged (172 closed within 1% of 218 complete).
+- 2012+ (`08 b5 75`): topology already fits the 2011 grammar (compact integers, edge-curve ref
+  kept; some shells carry an extra 0 before their bits); points, edge curves, lines, planes and
+  Hermite curves use new encodings (below). Old twins re-saved by 2012+ are reparametrized
+  (p-curve directions, plane frames differ), so values pair only approximately.
+- 2012+ plane: compact integer header v; bits 0-2 origin component zero; bit 3 U is the unit
+  vector of its one free component; bits 4-6 U component zero; bit 7 / 8-10 the same for V;
+  bit 11 scale (1, 1); bit 12 default box; then the stored doubles (295,743 records, all with
+  orthonormal U V). Some planes in the same files use other headers (`e4 xx`, 2011 form).

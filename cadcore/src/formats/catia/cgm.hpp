@@ -41,7 +41,7 @@ enum class Dialect { Varint, Compact, Fixed };
 const char* dialect_name(Dialect d);
 
 struct Record {
-    std::uint32_t id = 0;      // object id (compact: the id field, absolute when 4 bytes wide)
+    std::uint32_t id = 0;      // object id (compact levels 74..82: previous id + the id field's signed delta)
     std::uint16_t type = 0;    // class number (compact: from its type code, 0 when not mapped)
     std::uint8_t code = 0;     // compact: the type code as written
     std::uint8_t flags = 0;
@@ -56,6 +56,7 @@ struct Stream {
     std::uint32_t level = 0;     // directory level
     bool varint_bodies = true;   // record bodies use the varint-dialect body grammar
     std::vector<std::uint32_t> roots;  // varint dialect: root object ids named by the header
+    std::vector<std::uint8_t> features;  // compact: header bytes between the version strings and the directory
     std::vector<Record> records;
     std::size_t end = 0;         // first byte after the records (start of the trailer)
 };

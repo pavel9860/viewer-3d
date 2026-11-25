@@ -13,7 +13,7 @@
 //     512 face    refs surface, loops   i16 sense [u8]
 //     521 loop    refs (pcurve, edge)*n [, surface (V5R8 and later)]
 //                                       varint n, i16 a, i16 b, n x (i16, i16 sense, i16), i16
-//                                       [, i16 c (with the surface); c = 3: a 73-byte block follows]
+//                                       [, i16 c (with the surface); c != 0: a 73-byte block follows]
 //                 the senses chain the loop up to one direction for the whole loop
 //     511 edge    refs edge-curve, vertex, vertex, point, point   u8 flags
 //     14  point   refs curves           count, count x (f64 parameter, i32)

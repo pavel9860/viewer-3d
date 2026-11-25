@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "cadcore/error.hpp"
+#include "formats/catia/cgm_compact.hpp"
 
 namespace cadcore::formats::catia::cgm {
 namespace {
@@ -19,6 +21,7 @@ struct Obj {
     std::vector<std::uint32_t> refs;
     ByteView p;  // payload after the reference list
     std::size_t at = 0;
+    std::string error;  // compact record whose body did not decode (raised when the object is used)
 };
 
 // Sequential reader over a payload in the stream's byte order.
@@ -65,7 +68,25 @@ KnotVector knot_vector(Rd& r) {
 
 class Decoder {
 public:
-    Decoder(const Stream& s, std::vector<std::vector<std::uint32_t>> visible) : s_(s), visible_(std::move(visible)) {
+    Decoder(const Stream& s, std::vector<std::vector<std::uint32_t>> visible, const CompactLayout* layout) : s_(s), visible_(std::move(visible)) {
+        if (layout) {
+            // compact bodies in canonical (varint-dialect) form
+            for (const Record& rec : s.records) {
+                Obj o;
+                o.type = rec.type;
+                o.at = rec.offset;
+                try {
+                    Canonical c = canonical(rec, *layout);
+                    o.refs = std::move(c.refs);
+                    payloads_.push_back(std::move(c.payload));
+                    o.p = ByteView(payloads_.back().data(), payloads_.back().size());
+                } catch (const DecodeError& e) {
+                    o.error = e.what();
+                }
+                objs_.emplace(rec.id, std::move(o));
+            }
+            return;
+        }
         for (const Record& rec : s.records) {
             Obj o;
             o.type = rec.type;
@@ -81,18 +102,19 @@ public:
     Ir run() {
         // shells of volumes (525 -> 513 -> 520) bound solids; other shells are sheets
         for (const Record& rec : s_.records)
-            if (rec.type == 513)
+            if (rec.type == 513 && usable(rec.id))
                 for (std::uint32_t r : obj(rec.id).refs) solid_.insert(r);
         for (const Record& rec : s_.records)
             if (rec.type == 520) shell(rec.id);
         // bodies: 500 -> 520 (sheets), 500 -> 525 -> 513 -> 520 (solids); versions of a body share
         // their unchanged shells, so a shell can belong to several bodies
         for (const Record& rec : s_.records) {
-            if (rec.type != 500) continue;
+            if (rec.type != 500 || !usable(rec.id)) continue;
             Ir::Body bd;
             bd.id = rec.id;
             std::vector<std::uint32_t> todo = obj(rec.id).refs;
             for (std::size_t i = 0; i < todo.size() && i < 100000; ++i) {
+                if (!usable(todo[i])) continue;
                 const Obj& o = obj(todo[i]);
                 if (o.type == 525 || o.type == 513) todo.insert(todo.end(), o.refs.begin(), o.refs.end());
                 if (o.type == 520)
@@ -111,6 +133,7 @@ private:
     const Stream& s_;
     std::vector<std::vector<std::uint32_t>> visible_;
     std::unordered_map<std::uint32_t, Obj> objs_;
+    std::deque<std::vector<std::uint8_t>> payloads_;  // canonical payloads of compact records
     std::unordered_map<std::uint32_t, std::uint32_t> surface_, pcurve_, edge_, vertex_;
     std::unordered_map<std::uint32_t, std::optional<std::uint32_t>> face_;
     std::unordered_set<std::uint32_t> solid_;
@@ -120,9 +143,11 @@ private:
     const Obj& obj(std::uint32_t id) const {
         auto it = objs_.find(id);
         if (it == objs_.end()) bad("reference to a missing object " + std::to_string(id), 0);
+        if (!it->second.error.empty()) throw DecodeError(ErrorCode::Unsupported, it->second.error, it->second.at);
         return it->second;
     }
     Rd rd(const Obj& o) const { return Rd{o.p, s_.big, 0, o.at}; }
+    bool usable(std::uint32_t id) const { auto it = objs_.find(id); return it != objs_.end() && it->second.error.empty(); }
     static std::uint32_t first(const Obj& o) {
         if (o.refs.empty()) bad("record without its first reference", o.at);
         return o.refs[0];
@@ -305,6 +330,10 @@ private:
         }
         if (tail) r.k += 24;
         if (r.left() != 4) bad("edge-curve payload length", ec.at);
+        // some compact edge curves list their curves twice (A B A B) with the maps of the first copy
+        const std::size_t h = ec.refs.size() / 2;
+        if (f.size() == h && ec.refs.size() == 2 * h && std::equal(ec.refs.begin(), ec.refs.begin() + std::ptrdiff_t(h), ec.refs.begin() + std::ptrdiff_t(h)))
+            for (std::size_t i = 0; i < h; ++i) f.push_back(f[i]);
         if (f.size() != ec.refs.size()) bad("edge-curve maps differ from its curves", ec.at);
         return f;
     }
@@ -345,8 +374,9 @@ private:
     std::uint32_t edge(std::uint32_t id) {
         if (auto it = edge_.find(id); it != edge_.end()) return it->second;
         const Obj& e = obj(id);
-        if (e.refs.size() != 5) bad("edge without 5 references", e.at);
-        Ir::Edge ed{vertex(e.refs[1]), vertex(e.refs[2]), id};
+        if (e.refs.size() != 5 && e.refs.size() != 4) bad("edge without its vertices and points", e.at);
+        const std::size_t b = e.refs.size() - 4;  // [edge curve,] v0 v1 p0 p1
+        Ir::Edge ed{vertex(e.refs[b]), vertex(e.refs[b + 1]), id};
         const auto i = std::uint32_t(out_.edges.size());
         out_.edges.push_back(ed);
         edge_[id] = i;
@@ -363,8 +393,9 @@ private:
         Rd r = rd(l);
         if (r.var() != n) bad("loop count differs from its coedges", l.at);
         const std::size_t flags = 2 * (3 * n + (with_surface ? 4 : 3));
-        // A closing i16 of 3 announces a 73-byte block (not decoded; it holds no topology).
-        const bool block = with_surface && r.left() == flags + 73 && load_u16(r.b.data + r.k + flags - 2, s_.big) == 3;
+        // A non-zero closing i16 (3, or 1 in compact streams) announces a 73-byte block (not decoded;
+        // it holds no topology).
+        const bool block = with_surface && r.left() == flags + 73 && load_u16(r.b.data + r.k + flags - 2, s_.big) != 0;
         if (r.left() != flags && !block) throw DecodeError(ErrorCode::Unsupported, "loop flag layout of " + std::to_string(r.left()) + " bytes", l.at);
         r.i16();
         r.i16();
@@ -379,8 +410,9 @@ private:
             c.pcurve = pcurve(pcid);
             c.edge = edge(eid);
             c.sense = sense < 0 ? -1 : 1;
-            c.t0 = point_param(e.refs[3], pcid);
-            c.t1 = point_param(e.refs[4], pcid);
+            if (e.refs.size() < 4) bad("edge without its points", e.at);
+            c.t0 = point_param(e.refs[e.refs.size() - 2], pcid);
+            c.t1 = point_param(e.refs[e.refs.size() - 1], pcid);
             ces.push_back(c);
         }
         out_.loops.push_back({std::uint32_t(out_.coedges.size()), std::uint32_t(n)});
@@ -418,12 +450,12 @@ private:
     }
 
     void shell(std::uint32_t id) {
-        const Obj& s = obj(id);
-        Rd r = rd(s);
         Ir::Shell sh;
         sh.id = id;
         sh.solid = solid_.count(id) != 0;
         try {
+            const Obj& s = obj(id);
+            Rd r = rd(s);
             const std::uint32_t n = r.var();
             if (n != s.refs.size()) bad("shell count differs from its faces", s.at);
             r.i16();
@@ -452,8 +484,10 @@ struct Out {
 }  // namespace
 
 Ir decode(const Stream& stream, const std::vector<std::vector<std::uint32_t>>& visible) {
-    if (!stream.varint_bodies) throw DecodeError(ErrorCode::Unsupported, std::string("CGM ") + dialect_name(stream.dialect) + " dialect bodies of level " + std::to_string(stream.level) + " not decoded", 0);
-    return Decoder(stream, visible).run();
+    if (stream.varint_bodies) return Decoder(stream, visible, nullptr).run();
+    const auto layout = compact_layout(stream);
+    if (!layout) throw DecodeError(ErrorCode::Unsupported, std::string("CGM ") + dialect_name(stream.dialect) + " dialect bodies of level " + std::to_string(stream.level) + " (" + stream.version + ") not decoded", 0);
+    return Decoder(stream, visible, &*layout).run();
 }
 
 std::vector<std::uint8_t> serialize(const Ir& ir) {

@@ -52,11 +52,14 @@ void frame_varint(ByteView s, std::size_t dir, bool big, Stream& out) {
 // 65 2009Fall streams, whose reference lists still use the varint encoding (FINDINGS.md).
 std::uint16_t compact_class(std::uint8_t code) {
     switch (code) {
-        case 5: return 13;    case 6: return 14;
-        case 24: return 150;  case 25: return 151;  case 32: return 160;
-        case 35: return 193;  case 36: return 192;  case 37: return 191;
-        case 39: return 200;  case 40: return 201;  case 42: return 203;  case 43: return 204;
-        case 46: return 212;  case 52: return 231;  case 55: return 241;
+        case 2: return 10;    case 4: return 12;    case 5: return 13;    case 6: return 14;    case 14: return 100;
+        case 24: return 150;  case 25: return 151;  case 26: return 152;  case 32: return 160;
+        case 35: return 191;  case 36: return 192;  case 37: return 193;
+        case 29: return 155;
+        case 39: return 200;  case 40: return 201;  case 41: return 202;  case 42: return 203;  case 43: return 204;
+        case 44: return 210;  case 45: return 211;  case 46: return 212;  case 48: return 214;  case 50: return 216;
+        case 56: return 242;  case 57: return 243;  case 59: return 244;  case 64: return 251;
+        case 52: return 231;  case 55: return 241;
         case 91: return 500;  case 92: return 502;  case 93: return 510;  case 94: return 511;
         case 95: return 512;  case 96: return 513;  case 97: return 520;  case 98: return 521;
         case 100: return 524; case 101: return 525;
@@ -73,6 +76,7 @@ void frame_compact(ByteView s, std::size_t dir, Stream& out) {
     std::size_t k = dir + 11;
     const std::size_t end = k + size;
     if (end > s.size) bad("directory size past the stream end", dir);
+    std::uint32_t prev = 0;
     while (k < end) {
         const std::uint8_t m = s[k];
         const unsigned hi = m >> 4, lo = m & 15;
@@ -86,7 +90,24 @@ void frame_compact(ByteView s, std::size_t dir, Stream& out) {
         r.type = compact_class(r.code);
         std::size_t len = 0;
         for (unsigned i = 0; i < lw; ++i) len |= std::size_t(s[k + 3 + i]) << (8 * i);
-        for (unsigned i = 0; i < iw && i < 4; ++i) r.id |= std::uint32_t(s[k + 3 + lw + i]) << (8 * i);
+        if (out.level <= 82) {
+            // the id field holds the signed delta from the previous record's id (compact integer)
+            const std::uint8_t x = s[k + 3 + lw];
+            std::int64_t d;
+            if ((x & 3) == 1) d = x >> 2;
+            else if ((x & 3) == 3) d = -std::int64_t(x >> 2) - 1;
+            else {
+                const unsigned n = x >> 2;
+                if (n + 1 > iw) bad("compact id field", k);
+                std::uint64_t v = 0;
+                for (unsigned i = 0; i < n; ++i) v |= std::uint64_t(s[k + 4 + lw + i]) << (8 * i);
+                d = (x & 3) == 0 ? std::int64_t(v) : -std::int64_t(v) - 1;
+            }
+            prev = std::uint32_t(std::int64_t(prev) + d);
+            r.id = prev;
+        } else {
+            for (unsigned i = 0; i < iw && i < 4; ++i) r.id |= std::uint32_t(s[k + 3 + lw + i]) << (8 * i);
+        }
         const std::size_t body = k + 3 + lo;
         if (body + len > end) bad("record past the directory size", k);
         r.body = ByteView(s.data + body, len);
@@ -182,6 +203,11 @@ Stream frame(ByteView s) {
     const std::size_t vb = find_from(s, from, "\xe5\x0d\x06\x00\x01", 5);  // big-endian type
     const std::size_t vv = std::min(v, vb);
     if (c != ByteView::npos && c < vv) {
+        // feature bytes: after the second version string (u32 length + text), up to the directory
+        if (from + 4 <= c) {
+            const std::size_t n2 = load_u32(s.data + from, out.big);
+            if (from + 4 + n2 <= c) out.features.assign(s.data + from + 4 + n2, s.data + c);
+        }
         frame_compact(s, c, out);
         return out;
     }

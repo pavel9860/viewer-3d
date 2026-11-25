@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "formats/catia/cgm.hpp"
+#include "formats/catia/cgm_compact.hpp"
 #include "formats/catia/cgm_model.hpp"
 #include "harness.hpp"
 
@@ -54,4 +55,42 @@ TEST_CASE("CGM corpus parts: framing and B-rep decode") {
     const auto bin = cgm::serialize(ir);
     CHECK(bin.size() > 8);
     CHECK(std::string(reinterpret_cast<const char*>(bin.data()), 5) == "CGMIR");
+}
+
+TEST_CASE("CGM compact records: canonical form") {
+    // 2011Spring edge (compact integers, no edge-curve reference): v0 v1 p0 p1 as self - target
+    const std::vector<std::uint8_t> edge = {0x09, 0x0f, 0x07, 0x0b, 0x21};
+    cgm::Record r;
+    r.id = 100;
+    r.type = 511;
+    r.body = ByteView(edge.data(), edge.size());
+    const cgm::Canonical c = cgm::canonical(r, cgm::CompactLayout{true, false});
+    REQUIRE(c.refs.size() == 4);
+    CHECK(c.refs[0] == 98);   // 09: +2
+    CHECK(c.refs[1] == 104);  // 0f: -4
+    CHECK(c.refs[2] == 102);  // 07: -2
+    CHECK(c.refs[3] == 103);  // 0b: -3
+    CHECK((c.payload == std::vector<std::uint8_t>{0x21}));
+    // shell: one face, bits kind 3 (11), sense +1; closing -1 (raw i16 when integers are not compact)
+    const std::vector<std::uint8_t> shell = {0x81, 0x03, 0x13, 0xff, 0xff};
+    r.type = 520;
+    r.body = ByteView(shell.data(), shell.size());
+    const cgm::Canonical s = cgm::canonical(r, cgm::CompactLayout{false, true});
+    REQUIRE(s.refs.size() == 1);
+    CHECK(s.refs[0] == 101);
+    CHECK((s.payload == std::vector<std::uint8_t>{0x81, 3, 0, 1, 0, 0xff, 0xff}));
+}
+
+TEST_CASE("CGM compact corpus part (2011Spring): B-rep decode") {
+    const fs::path p = fs::path(CADCORE_SAMPLES_DIR) / "caa/caadoc/CAACommonLayoutItf.edu/CNext/resources/graphic/CAACloPspEduIn/GASKET-RF-150-4in.CATPart";
+    if (!fs::exists(p)) return;
+    const auto file = load(p);
+    const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+    REQUIRE(st.has_value());
+    const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
+    CHECK(fr.dialect == cgm::Dialect::Compact);
+    REQUIRE(cgm::compact_layout(fr).has_value());
+    const cgm::Ir ir = cgm::decode(fr);
+    CHECK(ir.faces.size() == 8);
+    CHECK(ir.skipped.empty());
 }
