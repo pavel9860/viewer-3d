@@ -133,7 +133,11 @@ fn boundary_events(w: &Body, tr: &Trim, s: &dyn Surf, other: &dyn Surf, weld: f6
                     if [t - h, t + h].iter().all(|&x| dist(other, c.ev(x).0) <= ACC) { continue; }
                     let q = c.ev(t).0;
                     let ab = sub(p1, p0);
-                    let along = (dot(sub(q, p0), ab) / dot(ab, ab)).clamp(0.0, 1.0);
+                    // a point beyond this segment's ends belongs to the neighbouring segment (which finds it too)
+                    let raw = dot(sub(q, p0), ab) / dot(ab, ab);
+                    let slack = weld / norm(ab).max(1e-300);
+                    if raw < -slack || raw > 1.0 + slack { continue; }
+                    let along = raw.clamp(0.0, 1.0);
                     if norm(sub(q, addv(p0, mulv(ab, along)))) > 10.0 * SSI_SAG { continue; }
                     if !hits.iter().any(|h| h.1.e == it.e && norm(sub(h.1.p, q)) < weld) { hits.push((along, Ev { e: it.e, t, p: q })); }
                 }
@@ -376,7 +380,7 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
     let pairs: Vec<(Id<Face>, Id<Face>)> = fa.iter().flat_map(|&x| fb.iter().map(move |&y| (x, y))).filter(|(x, y)| overlap(&boxes[x.ix()], &boxes[y.ix()])).collect();
     st.pairs = pairs.len();
     lap("trims, boxes, pairs");
-    let weld_tol = (10.0 * w.tol).max(1e-7);
+    let weld_tol = w.tol.max(1e-7);
     let pieces: Vec<Piece> = par::map(pairs.len(), workers, |i| {
         let t0 = std::time::Instant::now();
         let r = pair_pieces(&w, &trims, weld_tol, pairs[i].0, pairs[i].1);
