@@ -13,6 +13,7 @@ pub mod p21;
 pub mod par;
 pub mod ssi;
 pub mod step;
+pub mod tess;
 pub mod topo;
 pub mod tri;
 pub mod trim;

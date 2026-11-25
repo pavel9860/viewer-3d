@@ -57,7 +57,11 @@ pub fn seg_dist(a: P2, b: P2, c: P2, d: P2) -> f64 {
 }
 
 impl Trim {
-    pub fn new(b: &Body, s: &dyn Surf, sense: bool, loops: &[Vec<(Id<Edge>, bool)>]) -> Trim {
+    pub fn new(b: &Body, s: &dyn Surf, sense: bool, loops: &[Vec<(Id<Edge>, bool)>]) -> Trim { Self::with_sag(b, s, sense, loops, SAG) }
+    /// edges tessellated to chordal tolerance `sag`
+    pub fn with_sag(b: &Body, s: &dyn Surf, sense: bool, loops: &[Vec<(Id<Edge>, bool)>], sag: f64) -> Trim { Self::with_edge_sag(b, s, sense, loops, &|_| sag) }
+    /// each edge tessellated to its own chordal tolerance (shared edges get the same value in every face)
+    pub fn with_edge_sag(b: &Body, s: &dyn Surf, sense: bool, loops: &[Vec<(Id<Edge>, bool)>], sag: &dyn Fn(Id<Edge>) -> f64) -> Trim {
         let d = s.dom();
         let per = [if s.per_u() { d[1] - d[0] } else { 0.0 }, if s.per_v() { d[3] - d[2] } else { 0.0 }];
         let mut t = Trim { sg: if sense { 1.0 } else { -1.0 }, per, loops: vec![], poly: vec![], bb: [f64::MAX, f64::MIN, f64::MAX, f64::MIN] };
@@ -68,17 +72,47 @@ impl Trim {
                 let ed = b.edges.get(e);
                 let v = if sense { ed.v } else { [ed.v[1], ed.v[0]] };
                 let (mut ts, mut p) = match &ed.curve {
-                    Some(c) => { let ts = tess(c.as_ref(), ed.t[0], ed.t[1], SAG); let p = ts.iter().map(|&x| c.ev(x).0).collect(); (ts, p) }
+                    Some(c) => { let ts = tess(c.as_ref(), ed.t[0], ed.t[1], sag(e)); let p = ts.iter().map(|&x| c.ev(x).0).collect(); (ts, p) }
                     None => (vec![ed.t[0], ed.t[1]], vec![b.vertices.get(ed.v[0]).p, b.vertices.get(ed.v[1]).p]),
                 };
                 if !sense { ts.reverse(); p.reverse(); }
                 let n = p.len();
                 p[0] = b.vertices.get(v[0]).p;
                 p[n - 1] = b.vertices.get(v[1]).p;
-                let uv = p.iter().map(|&q| { let w = t.unwrap(prev, t.uv_near(s, q, prev)); prev = Some(w); w }).collect();
+                // the first point is the previous edge's last point (the same vertex): identical parameters
+                let first = prev;
+                let mut uv: Vec<P2> = p.iter().map(|&q| { let w = t.unwrap(prev, t.uv_near(s, q, prev)); prev = Some(w); w }).collect();
+                // a pole has no u of its own: it takes the u of its neighbour along this edge, and the loop runs along
+                // the pole line from the previous edge's u to this one
+                let pole = |q: P2| s.poles_v() && ((q[1] - d[2]).abs() < 1e-9 || (q[1] - d[3]).abs() < 1e-9);
+                let n = uv.len();
+                if n > 1 {
+                    if pole(uv[0]) { uv[0][0] = uv[1][0]; }
+                    if pole(uv[n - 1]) { uv[n - 1][0] = uv[n - 2][0]; prev = Some(uv[n - 1]); }
+                }
+                if let Some(f) = first { if !pole(uv[0]) { uv[0] = f; } }
                 items.push(Item { e, sense, uv, p, t: ts, v });
             }
+            // closing vertex: the loop ends where it started (unless it wraps a period, e.g. around a cylinder)
+            if let (Some(f), Some(l)) = (items.first().map(|i| i.uv[0]), items.last_mut()) {
+                let e = l.uv.last_mut().unwrap();
+                if (e[0] - f[0]).abs() + (e[1] - f[1]).abs() < 1e-9 * (1.0 + f[0].abs() + f[1].abs()) { *e = f; }
+            }
             t.loops.push(items);
+        }
+        // a single loop that crosses a pole line: the crossing to the far side (u +- half a period) is a tie; the
+        // side after the crossing is the one that orients the loop counter-clockwise (the face on its left)
+        if t.loops.len() == 1 && per[0] > 0.0 {
+            let l = &mut t.loops[0];
+            if let Some(j) = (0..l.len()).find(|&i| l[i].uv[l[i].uv.len() - 1] != l[(i + 1) % l.len()].uv[0]) {
+                if j + 1 < l.len() && area(&Self::ring(l)) < 0.0 {
+                    for sh in [-per[0], per[0]] {
+                        for it in l[j + 1..].iter_mut() { for q in it.uv.iter_mut() { q[0] += sh; } }
+                        if area(&Self::ring(l)) > 0.0 { break; }
+                        for it in l[j + 1..].iter_mut() { for q in it.uv.iter_mut() { q[0] -= sh; } }
+                    }
+                }
+            }
         }
         // loops on periodic surfaces: shift every loop to the sheet of the largest one
         t.poly = t.loops.iter().map(|l| Self::ring(l)).collect();
@@ -94,7 +128,10 @@ impl Trim {
         for q in t.poly.iter().flatten() { t.bb = [t.bb[0].min(q[0]), t.bb[1].max(q[0]), t.bb[2].min(q[1]), t.bb[3].max(q[1])]; }
         t
     }
-    fn ring(l: &[Item]) -> Vec<P2> { l.iter().flat_map(|it| it.uv[..it.uv.len() - 1].iter().copied()).collect() }
+    /// the loop polygon: each item's points without its last one, unless the next item starts elsewhere (a pole line)
+    fn ring(l: &[Item]) -> Vec<P2> {
+        (0..l.len()).flat_map(|i| { let it = &l[i]; let keep = it.uv[it.uv.len() - 1] != l[(i + 1) % l.len()].uv[0]; it.uv[..it.uv.len() - (!keep) as usize].iter().copied().collect::<Vec<_>>() }).collect()
+    }
     /// normalized parameters of a point (base sheet)
     pub fn uv(&self, s: &dyn Surf, p: V) -> P2 { let q = s.uv_of(p); [self.sg * q[0], q[1]] }
     /// normalized parameters of a point next to a known one (curve walking; see `uv_from`)
@@ -140,5 +177,41 @@ impl Trim {
         uv
     }
     pub fn polygons(&self) -> &[Vec<P2>] { &self.poly }
+    /// edges with a segment whose UV midpoint maps farther than `tol` from the segment's 3D midpoint (the straight UV
+    /// segment does not follow the 3D chord, e.g. near a pole): a face mesh along them cannot meet `tol`
+    pub fn bent_edges(&self, s: &dyn Surf, tol: f64) -> Vec<Id<Edge>> {
+        let mut out: Vec<Id<Edge>> = self.loops.iter().flatten().filter(|it| it.uv.windows(2).zip(it.p.windows(2)).any(|(w, q)| {
+            let r = self.raw([(w[0][0] + w[1][0]) / 2.0, (w[0][1] + w[1][1]) / 2.0]);
+            norm(sub(s.ev(r[0], r[1]).p, mulv(addv(q[0], q[1]), 0.5))) > tol
+        })).map(|it| it.e).collect();
+        out.sort_unstable_by_key(|e| e.0);
+        out.dedup();
+        out
+    }
+    /// edges whose tessellated segments cross or touch a non-adjacent segment of any loop (loops closer than the
+    /// tessellation tolerance): these need a finer tessellation
+    pub fn crossing_edges(&self) -> Vec<Id<Edge>> {
+        let segs: Vec<(P2, P2, Id<Edge>)> = self.loops.iter().flatten().flat_map(|it| it.uv.windows(2).map(move |w| (w[0], w[1], it.e))).collect();
+        let mut idx: Vec<usize> = (0..segs.len()).collect();
+        idx.sort_by(|&i, &j| segs[i].0[0].min(segs[i].1[0]).total_cmp(&segs[j].0[0].min(segs[j].1[0])));
+        let mut out = vec![];
+        for (k, &i) in idx.iter().enumerate() {
+            let (a, b, ea) = segs[i];
+            let xmax = a[0].max(b[0]);
+            for &j in &idx[k + 1..] {
+                let (c, d, eb) = segs[j];
+                if c[0].min(d[0]) > xmax { break; }
+                // segments sharing an end point meet there by construction
+                if a == c || a == d || b == c || b == d { continue; }
+                let (d1, d2, d3, d4) = (orient2d(c, d, a).0, orient2d(c, d, b).0, orient2d(a, b, c).0, orient2d(a, b, d).0);
+                if d1 * d2 <= 0 && d3 * d4 <= 0 && !(d1 == 0 && d2 == 0) {
+                    out.push(ea); out.push(eb);
+                }
+            }
+        }
+        out.sort_unstable_by_key(|e| e.0);
+        out.dedup();
+        out
+    }
 }
 fn centroid(p: &[P2]) -> P2 { let n = p.len().max(1) as f64; [p.iter().map(|q| q[0]).sum::<f64>() / n, p.iter().map(|q| q[1]).sum::<f64>() / n] }

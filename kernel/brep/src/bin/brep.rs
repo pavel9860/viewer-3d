@@ -1,6 +1,7 @@
 //! brep CLI.
 //!   brep check FILE.stp|LIST.tsv          import + validate
 //!   brep bool FILE.stp|LIST.tsv [SHELLS]  booleans of the largest closed shells with a cylinder through them
+//!   brep mesh FILE.stp|LIST.tsv [CHORD]   watertight tessellation (chord relative to the model diagonal, default 1e-3)
 use brep::boolean::{boolean, Op};
 use brep::geom::*;
 use brep::topo::*;
@@ -17,6 +18,7 @@ fn main() {
     let bad = match args[1].as_str() {
         "check" => files.iter().map(|f| check_file(f)).sum::<usize>(),
         "bool" => { let n = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(2); files.iter().map(|f| bool_file(f, n)).sum() }
+        "mesh" => { let c = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1e-3); files.iter().map(|f| mesh_file(f, c)).sum() }
         _ => { eprintln!("unknown command {}", args[1]); 2 }
     };
     std::process::exit((bad > 0) as i32);
@@ -84,4 +86,43 @@ fn unmatched(r: &Body, a: &Body, shell: &[Id<Face>], src: &Body) {
         let fs: Vec<String> = u.iter().map(|(fi, s)| format!("{}{}", step_of(r.faces.get(Id::new(*fi as usize)).origin.src - 1), if *s { "+" } else { "-" })).collect();
         eprintln!("  unmatched edge {e:?} origin {:?} {:?} -> {:?} faces {fs:?}", ed.origin, r.vertices.get(ed.v[0]).p, r.vertices.get(ed.v[1]).p);
     } }
+}
+
+/// tessellate every shell; closed shells must give closed meshes. Volume vs the exact face integral is an indicator.
+fn mesh_file(f: &str, chord: f64) -> usize {
+    use brep::tess::{mesh_volume, open_edges, tessellate, Opts};
+    let im = match step::import(f) { Ok(i) => i, Err(e) => { println!("{f}: {e}"); return 1 } };
+    let b = &im.body;
+    let t0 = Instant::now();
+    let o = Opts { chord, ..Default::default() };
+    let (mut tris, mut open, mut nonman, mut empty, mut coarse, mut dev, mut vrel) = (0, 0, 0, 0, 0, 0.0f64, 0.0f64);
+    let (mut mv, mut ev) = (0.0, 0.0);
+    for (_, sh) in b.shells.iter() {
+        let (m, st) = tessellate(b, &sh.faces, &o, WORKERS);
+        tris += m.tri.len();
+        empty += st.empty;
+        coarse += st.coarse;
+        dev = dev.max(st.max_dev);
+        if sh.closed {
+            let (op, nm) = open_edges(&m);
+            if op > 0 && std::env::var("BREP_DEBUG").is_ok() {
+                let mut d: std::collections::HashMap<(u32, u32), Vec<u32>> = Default::default();
+                for (i, t) in m.tri.iter().enumerate() { for k in 0..3 { d.entry((t[k], t[(k + 1) % 3])).or_default().push(m.face[i]); } }
+                let mut fs: std::collections::BTreeMap<u32, usize> = Default::default();
+                for (e, f) in &d { if !d.contains_key(&(e.1, e.0)) { for x in f { *fs.entry(b.faces.get(sh.faces[*x as usize]).origin.src).or_default() += 1; } } }
+                eprintln!("  open edges by face (STEP id: count): {fs:?}");
+            }
+            open += op;
+            nonman += nm;
+            let (v, _) = mesh::volume(b, &sh.faces);
+            mv += mesh_volume(&m);
+            ev += v;
+            vrel = vrel.max((mesh_volume(&m) - v).abs() / v.abs().max(1e-30));
+        }
+    }
+    let t = ms(t0);
+    let bad = open + empty + coarse;
+    println!("{:<26} {} faces -> {tris} triangles in {t:.0} ms | open edges {open} non-manifold {nonman} | empty faces {empty} coarse {coarse} | max dev {:.1e} mm | volume mesh/exact {:.6} (worst shell rel {vrel:.1e}){}",
+        f.rsplit('/').next().unwrap(), b.faces.len(), dev * im.diag, mv / ev, if bad > 0 { " FAIL" } else { "" });
+    bad
 }

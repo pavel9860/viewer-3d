@@ -14,6 +14,21 @@ fn check(name: &str) {
     let neg = tris.iter().filter(|t| area(&[pts[t[0]], pts[t[1]], pts[t[2]]]) < 0.0).count();
     let bad: Vec<_> = tris.iter().filter(|t| { let c = [(pts[t[0]][0] + pts[t[1]][0] + pts[t[2]][0]) / 3.0, (pts[t[0]][1] + pts[t[1]][1] + pts[t[2]][1]) / 3.0]; !brep::trim::in_poly(c, &r[0]) || r[1..].iter().any(|h| brep::trim::in_poly(c, h)) }).map(|t| [pts[t[0]], pts[t[1]], pts[t[2]]]).collect();
     for t in bad.iter().take(4) { eprintln!("triangle outside the region: {t:?}"); }
+    // no triangle edge may cross a ring edge
+    let rings: Vec<([f64; 2], [f64; 2])> = r.iter().flat_map(|q| (0..q.len()).map(move |i| (q[i], q[(i + 1) % q.len()]))).collect();
+    let pr = &pts;
+    let crossing = tris.iter().flat_map(|t| (0..3).map(move |k| (pr[t[k]], pr[t[(k + 1) % 3]]))).filter(|(a, b)| rings.iter().any(|(c, d)| {
+        let o = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| brep::exact::orient2d(p, q, r).0;
+        o(*a, *b, *c) * o(*a, *b, *d) < 0 && o(*c, *d, *a) * o(*c, *d, *b) < 0
+    })).count();
+    if std::env::var("TRI_DEBUG").is_ok() {
+        for t in &tris { for k in 0..3 { let (a, b) = (pts[t[k]], pts[t[(k + 1) % 3]]); for (c, d) in &rings {
+            let o = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| brep::exact::orient2d(p, q, r).0;
+            if o(a, b, *c) * o(a, b, *d) < 0 && o(*c, *d, a) * o(*c, *d, b) < 0 { eprintln!("triangle {:?} edge {a:?}-{b:?} crosses ring edge {c:?}-{d:?}", t); }
+        } } }
+    }
+    let flipped = tris.iter().filter(|t| brep::exact::orient2d(pts[t[0]], pts[t[1]], pts[t[2]]).0 < 0).count();
+    assert_eq!((crossing, flipped), (0, 0), "{name}: triangle edges crossing the boundary, non-positive triangles");
     assert!((got - want).abs() <= 1e-9 * want, "{name}: area {got} vs {want}, {} triangles, {neg} inverted", tris.len());
 }
 #[test] fn face_with_two_holes() { check("face_2holes.txt") }

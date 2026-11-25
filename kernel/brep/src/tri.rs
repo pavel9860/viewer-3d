@@ -10,17 +10,21 @@ fn o2(a: P2, b: P2, c: P2) -> i8 { orient2d(a, b, c).0 }
 
 /// rings: counter-clockwise outer boundaries and clockwise holes (region on the left of every edge).
 /// Returns the points (ring points, consecutive repeats removed) and counter-clockwise triangles.
-pub fn triangulate(rings: &[Vec<P2>]) -> (Vec<P2>, Vec<[usize; 3]>) {
+pub fn triangulate(rings: &[Vec<P2>]) -> (Vec<P2>, Vec<[usize; 3]>) { let (p, _, t) = triangulate_src(rings); (p, t) }
+
+/// as `triangulate`, also returning for each point its source (ring, index in ring)
+pub fn triangulate_src(rings: &[Vec<P2>]) -> (Vec<P2>, Vec<(usize, usize)>, Vec<[usize; 3]>) {
     // vertices with ring neighbours
     let (mut p, mut prev, mut next): (Vec<P2>, Vec<usize>, Vec<usize>) = (vec![], vec![], vec![]);
-    for r in rings {
-        let mut q: Vec<P2> = vec![];
-        for &x in r { if q.last() != Some(&x) { q.push(x); } }
-        while q.len() > 1 && q[0] == q[q.len() - 1] { q.pop(); }
+    let mut src = vec![];
+    for (ri, r) in rings.iter().enumerate() {
+        let mut q: Vec<(P2, usize)> = vec![];
+        for (k, &x) in r.iter().enumerate() { if q.last().map(|l| l.0) != Some(x) { q.push((x, k)); } }
+        while q.len() > 1 && q[0].0 == q[q.len() - 1].0 { q.pop(); }
         if q.len() < 3 { continue; }
         let s = p.len();
         let n = q.len();
-        for (k, x) in q.into_iter().enumerate() { p.push(x); prev.push(s + (k + n - 1) % n); next.push(s + (k + 1) % n); }
+        for (k, (x, i)) in q.into_iter().enumerate() { p.push(x); src.push((ri, i)); prev.push(s + (k + n - 1) % n); next.push(s + (k + 1) % n); }
     }
     let n = p.len();
     // a above b: greater y, then smaller x, then smaller index
@@ -112,42 +116,31 @@ pub fn triangulate(rings: &[Vec<P2>]) -> (Vec<P2>, Vec<[usize; 3]>) {
         while !seen[h] { seen[h] = true; face.push(he[h].0); h = succ(h); }
             monotone(&p, &face, &above, &mut tris);
         }
-    (p, tris)
+    (p, src, tris)
 }
 
-/// stack triangulation of a y-monotone counter-clockwise polygon
-fn monotone(p: &[P2], face: &[usize], above: &dyn Fn(usize, usize) -> bool, tris: &mut Vec<[usize; 3]>) {
-    let m = face.len();
-    if m < 3 { return; }
-    let mut emit = |a: usize, b: usize, c: usize| match o2(p[a], p[b], p[c]) { 1 => tris.push([a, b, c]), -1 => tris.push([a, c, b]), _ => {} };
-    if m == 3 { emit(face[0], face[1], face[2]); return; }
-    // left chain: from the top vertex along the boundary (counter-clockwise runs down the left side)
-    let top = (0..m).min_by(|&a, &b| if above(face[a], face[b]) { Ordering::Less } else { Ordering::Greater }).unwrap();
-    let bot = (0..m).min_by(|&a, &b| if above(face[a], face[b]) { Ordering::Greater } else { Ordering::Less }).unwrap();
-    let mut left = vec![false; m];
-    let mut k = top;
-    while k != bot { left[k] = true; k = (k + 1) % m; }
-    let mut u: Vec<usize> = (0..m).collect();
-    u.sort_by(|&a, &b| if a == b { Ordering::Equal } else if above(face[a], face[b]) { Ordering::Less } else { Ordering::Greater });
-    let mut st = vec![u[0], u[1]];
-    for j in 2..m - 1 {
-        let v = u[j];
-        if left[v] != left[*st.last().unwrap()] {
-            while st.len() > 1 { let a = st.pop().unwrap(); emit(face[v], face[a], face[*st.last().unwrap()]); }
-            st.clear();
-            st.push(u[j - 1]);
-            st.push(v);
+/// ear clipping of a simple counter-clockwise polygon (a monotone piece: no holes, no bridges). A convex corner is
+/// an ear when no other vertex lies in its triangle or on its new diagonal; collinear corners are dropped.
+fn monotone(p: &[P2], face: &[usize], _above: &dyn Fn(usize, usize) -> bool, tris: &mut Vec<[usize; 3]>) {
+    let mut v: Vec<usize> = face.to_vec();
+    let (mut i, mut misses) = (0usize, 0usize);
+    while v.len() > 3 {
+        let n = v.len();
+        i %= n;
+        let (a, b, c) = (v[(i + n - 1) % n], v[i], v[(i + 1) % n]);
+        let turn = o2(p[a], p[b], p[c]);
+        let ear = turn > 0 && v.iter().all(|&q| q == a || q == b || q == c || p[q] == p[a] || p[q] == p[b] || p[q] == p[c]
+            || !(o2(p[a], p[b], p[q]) > 0 && o2(p[b], p[c], p[q]) > 0 && o2(p[c], p[a], p[q]) >= 0));
+        if ear || (turn == 0 && misses > n) {
+            if ear { tris.push([a, b, c]); }
+            v.remove(i);
+            misses = 0;
+            i = i.saturating_sub(1);
         } else {
-            let mut last = st.pop().unwrap();
-            while let Some(&t) = st.last() {
-                // the diagonal v - t is inside when `last` is outside the triangle's side toward the chain
-                let s = o2(p[face[t]], p[face[v]], p[face[last]]);
-                if (left[v] && s < 0) || (!left[v] && s > 0) { emit(face[v], face[last], face[t]); last = st.pop().unwrap(); } else { break; }
-            }
-            st.push(last);
-            st.push(v);
+            i += 1;
+            misses += 1;
+            if misses > 2 * n { break; }
         }
     }
-    let v = u[m - 1];
-    while st.len() > 1 { let a = st.pop().unwrap(); emit(face[v], face[a], face[*st.last().unwrap()]); }
+    if v.len() == 3 && o2(p[v[0]], p[v[1]], p[v[2]]) > 0 { tris.push([v[0], v[1], v[2]]); }
 }
