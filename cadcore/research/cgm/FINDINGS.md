@@ -44,5 +44,5 @@ compact dialect bodies (56 B-rep-only parts); fixed dialect framing (30); sheet-
   2011+ pack further. Not decoded.
 - vs stored tessellation (old dialect): 171 of 192 fully decoded parts closed and within 1%.
 - B-rep-only: 134 closed solids, 21 open (216 fillet, 155 composite p-curve, 211, 251, 152, 170),
-  71 without a solid (surface parts; sheets not shown), 90 not meshed (compact 44, fixed 28,
-  no stream / damaged files 8, other 10).
+  71 without a solid (surface parts; sheets not shown), 90 not meshed (compact dialect 55, fixed
+  dialect 28, no CGM stream located 5, damaged store 2).
