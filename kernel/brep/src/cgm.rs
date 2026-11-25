@@ -124,6 +124,20 @@ impl Surf for CgmExtrusion {
     fn uv_of(&self, p: V) -> [f64; 2] { uv_newton(self, p) }
 }
 
+/// p = base(u, v) + d unit(Su x Sv)
+pub struct CgmOffset { pub base: Arc<dyn Surf>, pub d: f64 }
+impl Surf for CgmOffset {
+    fn ev(&self, u: f64, v: f64) -> D2 {
+        let n = |u: f64, v: f64| { let e = self.base.ev(u, v); (e.p, e.u, e.v, unit(cross(e.u, e.v))) };
+        let (p, su, sv, nn) = n(u, v);
+        let h = 1e-6 * (1.0 + u.abs() + v.abs());
+        let (nu, nv) = (sub(n(u + h, v).3, n(u - h, v).3), sub(n(u, v + h).3, n(u, v - h).3));
+        D2 { p: addv(p, mulv(nn, self.d)), u: addv(su, mulv(nu, self.d / (2.0 * h))), v: addv(sv, mulv(nv, self.d / (2.0 * h))), uu: ZERO, uv: ZERO, vv: ZERO }
+    }
+    fn dom(&self) -> [f64; 4] { [-1e9, 1e9, -1e9, 1e9] }
+    fn uv_of(&self, p: V) -> [f64; 2] { uv_newton(self, p) }
+}
+
 pub struct Coedge { pub pcurve: usize, pub edge: usize, pub sense: i32, pub t: [f64; 2] }
 pub struct Face { pub surface: usize, pub sense: i32, pub loops: Vec<std::ops::Range<usize>>, pub id: u32 }
 /// `solid`: bounds a volume; otherwise a sheet (open surfaces, reference planes)
@@ -230,6 +244,10 @@ impl Model {
                 let (on, prof) = m.pcurves.get(pc).ok_or("extrusion profile out of range")?;
                 let on = m.surfaces.get(*on).ok_or("extrusion profile surface not before it")?.clone();
                 Arc::new(CgmExtrusion { profile: prof.clone(), on, d: v3(p, 1) }) as Arc<dyn Surf>
+            } else if *kind == 8 {
+                if p.len() != 2 { return Err("offset parameters".into()); }
+                let base = m.surfaces.get(p[0] as usize).ok_or("offset base not before it")?.clone();
+                Arc::new(CgmOffset { base, d: p[1] }) as Arc<dyn Surf>
             } else { surface(*kind, p)? };
             m.surfaces.push(s);
         }

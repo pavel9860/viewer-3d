@@ -183,6 +183,13 @@ private:
                 vec(3);
                 break;
             }
+            case 214: {
+                if (o.refs.size() != 2) bad("offset surface without carrier and base", o.at);
+                const double base = double(surface(o.refs[1]));
+                sf.kind = SurfOffset;
+                sf.p = {base, r.f64()};
+                break;
+            }
             case 203: sf.kind = SurfSphere; vec(12); sf.p.push_back(r.f64()); break;
             case 204: sf.kind = SurfTorus; vec(14); break;
             case 231: {
