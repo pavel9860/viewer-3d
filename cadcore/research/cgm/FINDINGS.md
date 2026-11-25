@@ -68,3 +68,12 @@ Spike: `spike/cpt.py` (records, ids), `cgraph.py` (reference graph), `pairs.py` 
   4 closing bytes dropped.
 - 2012+: line p-curves use other form codes (1, 2, 8, 13, 72, 136, ...) with 0-5 f64; point
   parameters that equal a curve end become 1-byte codes (0x84 / 0x88 seen).
+- 2012+ pairing by content (`spike/pairs3.py`: a compact record is the old record of the same
+  class whose 8-byte doubles it contains): of the 7 parts saved both ways, 6 have both files here,
+  giving 4,174 line p-curves, 1,215 planes, 615 cylinders, 386 Hermite p-curves (points and
+  topology carry no doubles; they must pair through references next).
+- 2012+ line p-curve (24) after its surface reference: a flag byte. Bit 0: d = (0, 1), stores
+  o.x t0 t1 (o.y = 0); bit 1: d = (1, 0), stores o.y t0 t1 (o.x = 0); bit 6: d = (0, -1);
+  bit 7: d = (-1, 0); bit 3: symmetric range, only t0 stored (t1 = -t0); with no direction bit
+  the direction is stored. Bits 2 and 4 make values derived, not stored (form 6 keeps only the
+  range length pi/4; form 17 stores 1.646, 2.646 for o.y 1.646, range [0, 0.785]); not solved.
