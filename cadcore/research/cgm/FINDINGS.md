@@ -31,3 +31,18 @@ and within 1% volume, 16 more within 5%.
 Open: which body CATIA shows (needs the feature tree -> CGM body link; header roots only partly
 identify it); surfaces 202, 210, 211, 214, 216 (fillet), 242, 244; p-curves 152, 155, 170;
 compact dialect bodies (56 B-rep-only parts); fixed dialect framing (30); sheet-only parts.
+
+## Status 2026-11-25
+- Shown bodies: the part's CATSeeBodyCont (u32-counted id lists, 3 or 5 lists in all 1,500 parts
+  that have one) lists the CGM bodies CATIA displays: lists 0 and 1 (5-list form: origin planes +
+  results in list 0; 3-list form: results in list 1, planes in list 2). IR v2 has a body table
+  (bodies share unchanged shells across versions).
+- New surfaces: cone 202 (angle u/su, slant v), extrusion 210 (profile p-curve + direction),
+  offset 214 (refs[1] base + d along unit(Su x Sv); all 614 checked points), 242/244 carriers.
+- Compact dialect: type codes are one fixed enumeration (cgm.cpp compact_class). 2009Fall bodies
+  keep varint reference lists but pack scalars (ints as (v << 2) | 1 bytes, masked doubles);
+  2011+ pack further. Not decoded.
+- vs stored tessellation (old dialect): 171 of 192 fully decoded parts closed and within 1%.
+- B-rep-only: 134 closed solids, 21 open (216 fillet, 155 composite p-curve, 211, 251, 152, 170),
+  71 without a solid (surface parts; sheets not shown), 90 not meshed (compact 44, fixed 28,
+  no stream / damaged files 8, other 10).
