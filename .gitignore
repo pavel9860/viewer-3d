@@ -1,0 +1,17 @@
+# data and outputs stay local (model files, renders of them, profiles)
+/samples/
+/renders/
+/catia/review/
+/catia/eval/
+gmon.out
+perf.data*
+__pycache__/
+*.pyc
+# unrelated local tools
+/pydeps/
+/web/
+/server.py
+/trace_model.py
+/README.nn-viewer.md
+/.claude/
+/.git-premerge/
