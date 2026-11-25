@@ -123,12 +123,16 @@ private:
         return it->second;
     }
     Rd rd(const Obj& o) const { return Rd{o.p, s_.big, 0, o.at}; }
+    static std::uint32_t first(const Obj& o) {
+        if (o.refs.empty()) bad("record without its first reference", o.at);
+        return o.refs[0];
+    }
 
     std::uint32_t surface(std::uint32_t id) {
         if (auto it = surface_.find(id); it != surface_.end()) return it->second;
         const Obj& o = obj(id);
         if (o.type == 212 || o.type == 241) {
-            const std::uint32_t r = surface(o.refs.at(0));
+            const std::uint32_t r = surface(first(o));
             surface_[id] = r;
             return r;
         }
@@ -161,6 +165,24 @@ private:
                 sf.p.push_back(rad * su);
                 break;
             }
+            case 202: {
+                if (o.p.size != 184) bad("cone payload length", o.at);
+                sf.kind = SurfCone;
+                vec(14);          // o X Y Z, half-angle, radius at v = 0
+                r.k += 4 * 8;     // u0 u1 v0 v1
+                sf.p.push_back(r.f64());  // su
+                break;
+            }
+            case 210: {
+                // profile: a p-curve, or an edge curve whose first curve is one (same parameter)
+                std::uint32_t prof = first(o);
+                if (is_edge_curve(obj(prof).type)) prof = first(obj(prof));
+                const double pc = double(pcurve(prof));
+                sf.kind = SurfExtrusion;
+                sf.p.push_back(pc);
+                vec(3);
+                break;
+            }
             case 203: sf.kind = SurfSphere; vec(12); sf.p.push_back(r.f64()); break;
             case 204: sf.kind = SurfTorus; vec(14); break;
             case 231: {
@@ -189,7 +211,7 @@ private:
         const Obj& o = obj(id);
         Ir::PCurve pc;
         pc.id = id;
-        pc.surface = surface(o.refs.at(0));
+        pc.surface = surface(first(o));
         Rd r = rd(o);
         switch (o.type) {
             case 150:

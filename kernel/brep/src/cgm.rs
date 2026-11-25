@@ -52,6 +52,8 @@ pub struct CgmPlane { pub o: V, pub u: V, pub v: V }
 pub struct CgmCyl { pub o: V, pub x: V, pub y: V, pub z: V, pub r: f64, pub su: f64 }
 /// p = o + cos b (cos a A + sin a B) + sin b C, a = u / k, b = v / k (A, B, C scaled by the radius)
 pub struct CgmSphere { pub o: V, pub a: V, pub b: V, pub c: V, pub k: f64 }
+/// p = o + (r0 + v cos a)(cos t X + sin t Y) + v sin a Z, t = u / su
+pub struct CgmCone { pub o: V, pub x: V, pub y: V, pub z: V, pub a: f64, pub r0: f64, pub su: f64 }
 /// p = o + (R + r cos b)(cos a X + sin a Y) + r sin b Z, a = u / R, b = v / r
 pub struct CgmTorus { pub o: V, pub x: V, pub y: V, pub z: V, pub big: f64, pub r: f64 }
 
@@ -83,6 +85,18 @@ impl Surf for CgmSphere {
     fn dom(&self) -> [f64; 4] { [-1e9, 1e9, -1e9, 1e9] }
     fn uv_of(&self, p: V) -> [f64; 2] { uv_newton(self, p) }
 }
+impl Surf for CgmCone {
+    fn ev(&self, u: f64, v: f64) -> D2 {
+        let t = u / self.su;
+        let (st, ct) = t.sin_cos();
+        let (sa, ca) = self.a.sin_cos();
+        let dir = lin(ZERO, &[(self.x, ct), (self.y, st)]);
+        let w = self.r0 + v * ca;
+        D2 { p: addv(self.o, addv(mulv(dir, w), mulv(self.z, v * sa))), u: mulv(lin(ZERO, &[(self.x, -st), (self.y, ct)]), w / self.su), v: addv(mulv(dir, ca), mulv(self.z, sa)), uu: ZERO, uv: ZERO, vv: ZERO }
+    }
+    fn dom(&self) -> [f64; 4] { [-1e9, 1e9, -1e9, 1e9] }
+    fn uv_of(&self, p: V) -> [f64; 2] { uv_newton(self, p) }
+}
 impl Surf for CgmTorus {
     fn ev(&self, u: f64, v: f64) -> D2 {
         let (a, b) = (u / self.big, v / self.r);
@@ -90,6 +104,21 @@ impl Surf for CgmTorus {
         let dir = lin(ZERO, &[(self.x, ca), (self.y, sa)]);
         let w = self.big + self.r * cb;
         D2 { p: addv(self.o, addv(mulv(dir, w), mulv(self.z, self.r * sb))), u: mulv(lin(ZERO, &[(self.x, -sa), (self.y, ca)]), w / self.big), v: addv(mulv(dir, -sb), mulv(self.z, cb)), uu: ZERO, uv: ZERO, vv: ZERO }
+    }
+    fn dom(&self) -> [f64; 4] { [-1e9, 1e9, -1e9, 1e9] }
+    fn uv_of(&self, p: V) -> [f64; 2] { uv_newton(self, p) }
+}
+
+/// p = profile(u) + v d, the profile a p-curve on another surface
+pub struct CgmExtrusion { pub profile: Arc<PCurve>, pub on: Arc<dyn Surf>, pub d: V }
+impl Surf for CgmExtrusion {
+    fn ev(&self, u: f64, v: f64) -> D2 {
+        let uv = self.profile.uv(u);
+        let h = 1e-6 * (1.0 + u.abs());
+        let (a, b) = (self.profile.uv(u + h), self.profile.uv(u - h));
+        let s = self.on.ev(uv[0], uv[1]);
+        let du = addv(mulv(s.u, (a[0] - b[0]) / (2.0 * h)), mulv(s.v, (a[1] - b[1]) / (2.0 * h)));
+        D2 { p: addv(s.p, mulv(self.d, v)), u: du, v: self.d, uu: ZERO, uv: ZERO, vv: ZERO }
     }
     fn dom(&self) -> [f64; 4] { [-1e9, 1e9, -1e9, 1e9] }
     fn uv_of(&self, p: V) -> [f64; 2] { uv_newton(self, p) }
@@ -108,7 +137,7 @@ pub struct Skip { pub id: u32, pub kind: u32, pub why: String }
 pub struct Model {
     pub surfaces: Vec<Arc<dyn Surf>>,
     /// (surface, curve)
-    pub pcurves: Vec<(usize, PCurve)>,
+    pub pcurves: Vec<(usize, Arc<PCurve>)>,
     pub vertices: usize,
     /// vertex indices (start, end)
     pub edges: Vec<[usize; 2]>,
@@ -143,6 +172,7 @@ fn surface(kind: u32, p: &[f64]) -> Result<Arc<dyn Surf>, String> {
         2 => { need(11)?; let (x, y) = (v3(p, 3), v3(p, 6)); Arc::new(CgmCyl { o: v3(p, 0), x, y, z: cross(x, y), r: p[9], su: p[10] }) }
         3 => { need(13)?; Arc::new(CgmSphere { o: v3(p, 0), a: v3(p, 3), b: v3(p, 6), c: v3(p, 9), k: p[12] }) }
         4 => { need(14)?; Arc::new(CgmTorus { o: v3(p, 0), x: v3(p, 3), y: v3(p, 6), z: v3(p, 9), big: p[12], r: p[13] }) }
+        6 => { need(15)?; Arc::new(CgmCone { o: v3(p, 0), x: v3(p, 3), y: v3(p, 6), z: v3(p, 9), a: p[12], r0: p[13], su: p[14] }) }
         5 => {
             need(5)?;
             let (du, dv, nu, nv, rat) = (p[0] as usize, p[1] as usize, p[2] as usize, p[3] as usize, p[4] != 0.0);
@@ -190,8 +220,19 @@ impl Model {
         let mut r = Rd { b, k: 8 };
         let c: Vec<usize> = (0..10).map(|_| r.n()).collect::<Result<_, _>>()?;
         let mut m = Model { surfaces: vec![], pcurves: vec![], vertices: c[2], edges: vec![], coedges: vec![], faces: vec![], shells: vec![], bodies: vec![], skipped: vec![] };
-        for _ in 0..c[0] { let (kind, _id, n) = (r.u32()?, r.u32()?, r.n()?); let p = r.f64s(n)?; m.surfaces.push(surface(kind, &p)?); }
-        for _ in 0..c[1] { let (kind, s, _id, n) = (r.u32()?, r.n()?, r.u32()?, r.n()?); let p = r.f64s(n)?; if s >= m.surfaces.len() { return Err("p-curve surface out of range".into()); } m.pcurves.push((s, pcurve(kind, &p)?)); }
+        let raw: Vec<(u32, Vec<f64>)> = (0..c[0]).map(|_| { let (kind, _id, n) = (r.u32()?, r.u32()?, r.n()?); Ok((kind, r.f64s(n)?)) }).collect::<Result<_, String>>()?;
+        for _ in 0..c[1] { let (kind, s, _id, n) = (r.u32()?, r.n()?, r.u32()?, r.n()?); let p = r.f64s(n)?; if s >= raw.len() { return Err("p-curve surface out of range".into()); } m.pcurves.push((s, Arc::new(pcurve(kind, &p)?))); }
+        // surfaces in order; an extrusion's profile lies on an earlier surface
+        for (kind, p) in &raw {
+            let s = if *kind == 7 {
+                if p.len() != 4 { return Err("extrusion parameters".into()); }
+                let pc = p[0] as usize;
+                let (on, prof) = m.pcurves.get(pc).ok_or("extrusion profile out of range")?;
+                let on = m.surfaces.get(*on).ok_or("extrusion profile surface not before it")?.clone();
+                Arc::new(CgmExtrusion { profile: prof.clone(), on, d: v3(p, 1) }) as Arc<dyn Surf>
+            } else { surface(*kind, p)? };
+            m.surfaces.push(s);
+        }
         for _ in 0..c[3] { let (a, b, _id) = (r.n()?, r.n()?, r.u32()?); if a >= m.vertices || b >= m.vertices { return Err("edge vertex out of range".into()); } m.edges.push([a, b]); }
         for _ in 0..c[4] {
             let (pc, e, sense, _) = (r.n()?, r.n()?, r.i32()?, r.u32()?);

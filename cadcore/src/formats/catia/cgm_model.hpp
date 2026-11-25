@@ -26,6 +26,8 @@
 //     200 plane    o U V scale[2] box[4] (15 f64), or o, u8 zero-mask of U V, the non-zero
 //                  components, scale[2], box[4]          p = o + u U + v V
 //     201 cylinder o X Y r u0 u1 v0 v1 su sv [ref]       angle = u / (r su), height = v along X x Y
+//     202 cone     o X Y Z a r0 u0 u1 v0 v1 su sv ...   (23 f64) angle u / su, slant length v
+//     210 extrusion refs profile (p-curve, or edge curve of one); d[3] v0 v1 ... (10 f64)
 //     203 sphere   o A B C (axes times r) r ...          angles u / r, v / r
 //     204 torus    o X Y Z R r ...                       angles u / R, v / r
 //     231 NURBS    knot vectors u, v; i16 rational; poles (v fastest); [weights]
@@ -51,7 +53,9 @@ enum SurfaceKind : std::uint32_t {
     SurfCylinder = 2,  // o[3] X[3] Y[3] r su      p = o + r(cos a X + sin a Y) + v (X x Y), a = u / su
     SurfSphere = 3,    // o[3] A[3] B[3] C[3] k    p = o + cos b (cos a A + sin a B) + sin b C, a = u/k, b = v/k
     SurfTorus = 4,     // o[3] X[3] Y[3] Z[3] R r  p = o + (R + r cos b)(cos a X + sin a Y) + r sin b Z, a = u/R, b = v/r
-    SurfNurbs = 5,     // du dv nu nv rational | knots u (nu+du+1) | knots v | poles[nu][nv][3] | weights
+    SurfNurbs = 5,
+    SurfCone = 6,
+    SurfExtrusion = 7, // pcurve d[3]               p = profile(u) + v d (profile: a p-curve on another surface)      // o[3] X[3] Y[3] Z[3] a r0 su  p = o + (r0 + v cos a)(cos t X + sin t Y) + v sin a Z, t = u / su     // du dv nu nv rational | knots u (nu+du+1) | knots v | poles[nu][nv][3] | weights
 };
 // P-curve kinds.
 enum PCurveKind : std::uint32_t {
