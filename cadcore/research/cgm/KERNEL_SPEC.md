@@ -1,0 +1,67 @@
+# Pending IR surface kinds (cadcore → kernel)
+
+These kinds are decoded by cadcore, but the kernel's IR reader (`kernel/brep/src/cgm.rs`, `surface()`) does
+not evaluate them yet. An unknown kind makes the kernel reject the whole IR file. To keep that from
+happening, cadcore emits these kinds only on request:
+
+- `cadcli cgm PART OUT.cgmir --pending`
+- `cgm::DecodeOptions::pending_kinds`
+
+Without the option, their faces stay in `skipped` with the reason "awaits kernel support".
+Once the kernel evaluates them, cadcore's default can flip.
+
+The IR layout is unchanged (CGMIR v2). Each surface is written as `kind, id, n, f64 p[n]`.
+
+## 9: revolution (CGM class 211)
+
+```
+p = o[3] X[3] Y[3] Z[3] k | profile
+p(t, s) = o + Rot_Z(s / k) (C(t) - o)
+Rot_Z turns X toward Y about the axis through o along Z: with w = C(t) - o, x = w.X, y = w.Y, z = w.Z, a = s / k:
+p = o + (x cos a - y sin a) X + (x sin a + y cos a) Y + z Z
+```
+
+- `t` is the profile's own parameter, which is the **first** coordinate of the face's p-curves on this surface.
+  `s` is the second coordinate.
+- The profile is `p[13]` followed by its data:
+  - `1, pcurve`: an IR p-curve index. C is that p-curve evaluated on its surface (like the extrusion's profile).
+  - `2, o[3], d[3]`: a 3D line, C(t) = o + t d.
+  - `3, degree, nk, knots[nk], np, rational, poles[np][3], weights[np if rational]`: a 3D B-spline. The
+    knots are expanded (already repeated by multiplicity).
+- Evidence (research scripts, ground truth = CATIA's stored tessellation):
+  - The axis is Z. On CAAGsiStartVolume, 288 stored vertices lie on the surface with axis Z and none with
+    axis X or Y.
+  - The rotation from the profile equals s / k, in the X→Y sense. On PINZA_DERECHA, the stored vertices
+    cover 0.0067..1.7568 rad against s/k = 0..1.7568. Cilindro Cabeca, Tibia and assembly A part-8568 agree.
+  - On hair-dryer, the shared edges between pairs of 211 surfaces agree to 2.5e-14.
+  - Every partial turn in the corpus starts at a multiple of 2π (or at 0). An origin offset is therefore
+    indistinguishable from the data, and it does not affect full turns.
+
+## 10: fillet (CGM class 216, rolling ball)
+
+```
+p = n | knots[n] | P[n][10] | D1[n][10] | D2[n][10] | u0 u1 v0 v1
+section(u): 10 values (p1[3] p2[3] c[3] th) interpolated by the C2 quintic Hermite of P, D1, D2 over the
+            knots, the same basis as PcHermite (h0..h5 in cgm.rs PCurve::uv)
+p(u, v) = c + (sin(th - f) (p1 - c) + sin f (p2 - c)) / sin th,   f = th (v - v0) / (v1 - v0)
+```
+
+- p1 and p2 are the contact points and c is the centre; |p1 - c| = |p2 - c| = r. th is the arc angle.
+- v = v0 is on p1 and v = v1 is on p2. v1 is the radius in every sample seen.
+- The face's p-curves are on a 241 carrier, whose parameters are the fillet's (cadcore resolves carriers).
+- Evidence:
+  - On plug.CATPart, every fillet has between 93 and 109 stored vertices on its surface (tolerance 1e-4 of
+    the part's size).
+  - Fillet points along each constant-v edge lie on the neighbouring plane or cylinder within 3.8e-6, and
+    the swapped orientation (1 - v) fails.
+  - Between knots, |p1 - c| and |p2 - c| agree, and the p1-c-p2 angle matches th, to 1.6e-5.
+- Not verified: whether f is linear in v. The surface's shape does not depend on that choice, but interior
+  trimming curves in v would. No case in the corpus could distinguish it.
+
+## Still open (not emitted)
+
+- 251 (refs: a 243 surface and a p-curve) and 243 (about 850 bytes): not decoded.
+- Compact code 33: varint class 170, a B-spline p-curve (refs surface; i16 0, knot vector, 2D poles,
+  37-byte tail). It costs about 5.9k faces in 34 parts and is also the profile of several compact
+  revolutions. The 2012+ form has fields that are still unknown. When it is decoded, it needs a new
+  p-curve kind (2D B-spline).

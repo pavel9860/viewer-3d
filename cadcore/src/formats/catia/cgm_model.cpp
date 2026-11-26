@@ -68,7 +68,7 @@ KnotVector knot_vector(Rd& r) {
 
 class Decoder {
 public:
-    Decoder(const Stream& s, std::vector<std::vector<std::uint32_t>> visible, const CompactLayout* layout) : s_(s), visible_(std::move(visible)) {
+    Decoder(const Stream& s, std::vector<std::vector<std::uint32_t>> visible, const CompactLayout* layout, const DecodeOptions& opt) : s_(s), visible_(std::move(visible)), opt_(opt) {
         if (layout) {
             // compact bodies in canonical (varint-dialect) form
             auto canon = canonical_records(s, *layout);
@@ -133,6 +133,7 @@ public:
 private:
     const Stream& s_;
     std::vector<std::vector<std::uint32_t>> visible_;
+    DecodeOptions opt_;
     std::unordered_map<std::uint32_t, Obj> objs_;
     std::deque<std::vector<std::uint8_t>> payloads_;  // canonical payloads of compact records
     std::unordered_map<std::uint32_t, std::uint32_t> surface_, pcurve_, edge_, vertex_;
@@ -152,6 +153,48 @@ private:
     static std::uint32_t first(const Obj& o) {
         if (o.refs.empty()) bad("record without its first reference", o.at);
         return o.refs[0];
+    }
+
+    void pending(const Obj& o, const char* what) const {
+        if (!opt_.pending_kinds) throw DecodeError(ErrorCode::Unsupported, "surface type " + std::to_string(o.type) + " (" + what + ") awaits kernel support", o.at);
+    }
+
+    // A revolution's profile (cgm_model.hpp SurfRevolution): edge curves stand for their first curve.
+    void profile(std::uint32_t c, std::vector<double>& p) {
+        for (int depth = 0; is_edge_curve(obj(c).type); ++depth) {
+            if (depth > 8) bad("edge curves nest too deep", obj(c).at);
+            c = first(obj(c));
+        }
+        const Obj& o = obj(c);
+        Rd r = rd(o);
+        switch (o.type) {
+            case 150: case 151: case 160:
+                p.push_back(1);
+                p.push_back(double(pcurve(c)));
+                return;
+            case 100:
+                p.push_back(2);
+                for (int i = 0; i < 6; ++i) p.push_back(r.f64());
+                return;
+            case 130: {
+                const KnotVector kv = knot_vector(r);
+                const bool rat = r.i16() != 0;
+                const std::size_t np = kv.poles();
+                p.push_back(3);
+                p.push_back(double(kv.degree));
+                std::vector<double> knots;
+                for (std::size_t i = 0; i < kv.knots.size(); ++i)
+                    for (int m = 0; m < kv.mults[i]; ++m) knots.push_back(kv.knots[i]);
+                p.push_back(double(knots.size()));
+                p.insert(p.end(), knots.begin(), knots.end());
+                p.push_back(double(np));
+                p.push_back(rat ? 1.0 : 0.0);
+                for (std::size_t i = 0; i < 3 * np; ++i) p.push_back(r.f64());
+                if (rat) for (std::size_t i = 0; i < np; ++i) p.push_back(r.f64());
+                return;
+            }
+            default: throw DecodeError(ErrorCode::Unsupported, "revolution profile of class " + std::to_string(o.type), o.at);
+        }
     }
 
     std::uint32_t surface(std::uint32_t id) {
@@ -218,6 +261,26 @@ private:
             }
             case 203: sf.kind = SurfSphere; vec(12); sf.p.push_back(r.f64()); break;
             case 204: sf.kind = SurfTorus; vec(14); break;
+            case 211: {
+                pending(o, "revolution");
+                sf.kind = SurfRevolution;
+                vec(12);
+                r.k += 4 * 8 + 8;  // box, two ints
+                sf.p.push_back(r.f64());  // k
+                profile(first(o), sf.p);
+                break;
+            }
+            case 216: {
+                pending(o, "fillet");
+                sf.kind = SurfFillet;
+                const std::int32_t n = r.i32();
+                const KnotVector kv = knot_vector(r);
+                if (kv.degree != 5 || kv.knots.size() != std::size_t(n)) bad("fillet knot vector", o.at);
+                sf.p.push_back(double(n));
+                sf.p.insert(sf.p.end(), kv.knots.begin(), kv.knots.end());
+                vec(30 * n + 4);
+                break;
+            }
             case 231: {
                 sf.kind = SurfNurbs;
                 const KnotVector u = knot_vector(r), v = knot_vector(r);
@@ -501,11 +564,11 @@ struct Out {
 
 }  // namespace
 
-Ir decode(const Stream& stream, const std::vector<std::vector<std::uint32_t>>& visible) {
-    if (stream.varint_bodies) return Decoder(stream, visible, nullptr).run();
+Ir decode(const Stream& stream, const std::vector<std::vector<std::uint32_t>>& visible, const DecodeOptions& options) {
+    if (stream.varint_bodies) return Decoder(stream, visible, nullptr, options).run();
     const auto layout = compact_layout(stream);
     if (!layout) throw DecodeError(ErrorCode::Unsupported, std::string("CGM ") + dialect_name(stream.dialect) + " dialect bodies of level " + std::to_string(stream.level) + " (" + stream.version + ") not decoded", 0);
-    return Decoder(stream, visible, &*layout).run();
+    return Decoder(stream, visible, &*layout, options).run();
 }
 
 std::vector<std::uint8_t> serialize(const Ir& ir) {

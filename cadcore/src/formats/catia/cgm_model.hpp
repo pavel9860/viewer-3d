@@ -38,6 +38,11 @@
 //     150 line     o d t0 t1 (6 f64), or o, unused, d, t0, t1, scale (8 f64)
 //     151 circle   c, i32 i32, r, t0, t1, s [, ref]      angle = t / (r s)
 //     160 Hermite  knot vector, i32 n, P[2][n], D1[2][n], i16 has-second, [D2[2][n]], t0 t1
+//     211 revolution refs profile (edge curve, p-curve, 100 line, 130 B-spline curve); o X Y Z (12 f64),
+//                  box (4 f64), i32, i32, k, f64, f64, f64, i32, f64
+//     216 fillet   i32 n, knot vector (degree 5, n knots), f64 P[n][10], D1[n][10], D2[n][10], u0 u1 v0 v1,
+//                  more (not decoded)
+//   3D curves: 100 line o[3] d[3] ...; 130 B-spline knot vector, i16 rational, poles[3], [weights], ...
 //   knot vector: i32 degree, i32, i32, i32 n, i32, f64 knots[n], i32 multiplicities[n]
 #pragma once
 
@@ -58,7 +63,18 @@ enum SurfaceKind : std::uint32_t {
     SurfNurbs = 5,
     SurfCone = 6,
     SurfOffset = 8,    // base d                     p = base(u, v) + d unit(Su x Sv)
-    SurfExtrusion = 7, // pcurve d[3]               p = profile(u) + v d (profile: a p-curve on another surface)      // o[3] X[3] Y[3] Z[3] a r0 su  p = o + (r0 + v cos a)(cos t X + sin t Y) + v sin a Z, t = u / su     // du dv nu nv rational | knots u (nu+du+1) | knots v | poles[nu][nv][3] | weights
+    SurfExtrusion = 7, // pcurve d[3]               p = profile(u) + v d (profile: a p-curve on another surface)
+    // Emitted only with DecodeOptions::pending_kinds (the kernel does not evaluate them yet;
+    // research/cgm/KERNEL_SPEC.md):
+    SurfRevolution = 9, // o[3] X[3] Y[3] Z[3] k | profile      p(t, s) = o + Rot_Z(s / k) (C(t) - o),
+                        //   Rot_Z turning X toward Y; t: the profile's parameter (first p-curve coordinate),
+                        //   s: second coordinate; profile C: 1 pcurve-index (a p-curve on its surface),
+                        //   2 o[3] d[3] (3D line C = o + t d), 3 B-spline (degree, nk, knots[nk] expanded,
+                        //   np, rational, poles[np][3], weights[np] when rational)
+    SurfFillet = 10,    // n | knots[n] | P[n][10] | D1[n][10] | D2[n][10] | u0 u1 v0 v1
+                        //   section(u) = C2 quintic Hermite of the 10 values (p1[3] p2[3] c[3] angle), as
+                        //   PcHermite; p(u, v) = c + (sin(th - f) (p1 - c) + sin f (p2 - c)) / sin th,
+                        //   th = section angle, f = th (v - v0) / (v1 - v0)      // o[3] X[3] Y[3] Z[3] a r0 su  p = o + (r0 + v cos a)(cos t X + sin t Y) + v sin a Z, t = u / su     // du dv nu nv rational | knots u (nu+du+1) | knots v | poles[nu][nv][3] | weights
 };
 // P-curve kinds.
 enum PCurveKind : std::uint32_t {
@@ -94,7 +110,10 @@ struct Ir {
 
 // The B-rep of a framed varint-dialect stream. Faces whose geometry or grammar is not decoded are
 // left out and listed in `skipped` with the reason. Throws Unsupported for other dialects.
-Ir decode(const Stream& stream, const std::vector<std::vector<std::uint32_t>>& visible = {});
+struct DecodeOptions {
+    bool pending_kinds = false;  // emit surface kinds the kernel does not evaluate yet (SurfRevolution, SurfFillet)
+};
+Ir decode(const Stream& stream, const std::vector<std::vector<std::uint32_t>>& visible = {}, const DecodeOptions& options = {});
 
 // Binary IR (little-endian):
 //   "CGMIR\0\0\2", u32 surfaces pcurves vertices edges coedges loops faces shells bodies skipped,

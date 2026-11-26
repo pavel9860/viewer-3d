@@ -179,3 +179,19 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   251, code 33). vs stored tessellation: 41 complete parts (25 within 1%, 9 within 5%), 13 partial,
   11 without a stored mesh. On 39 parts every stored vertex lies on our surfaces. Polia inferior's far
   vertices lie on its 6 skipped fillet (216) faces.
+
+## Classes 211 (revolution) and 216 (fillet) — decoded, pending kernel support (KERNEL_SPEC.md)
+- 211: refs the profile (edge curve, p-curve, 100 3D line or 130 3D B-spline). Then o X Y Z (12 f64), box
+  (4 f64), two ints, k, 3 f64, int, f64. The last f64 is the middle of the s range, where full turns are
+  split into two faces. p(t, s) = o + Rot_Z(s/k)(C(t) - o).
+- 216: int n, knot vector (degree 5), n sections of 10 values (p1, p2, centre, angle) with their first and
+  second derivatives, then a tail starting with the box u0 u1 v0 v1. The face is the circular arc p1→p2
+  around the centre; v = v0 is at p1 and v = v1 is at p2.
+- Knot vectors in all compact layouts may list their multiplicities. In raw-integer streams the list
+  follows a 0 byte; in compact streams it follows directly; a 1 byte means standard multiplicities.
+- 130 (3D B-spline curve, varint): knot vector, i16 rational, poles[3], [weights], tail. 100 (3D line):
+  o d, 1.0, t0 t1.
+- 170 = compact code 33 (B-spline p-curve): i16 0, knot vector, 2D poles, tail (two i16, t0 t1, 1.0,
+  0.0, u8). 2009Fall bodies fit; 2012+ bodies have more fields (open).
+- With `--pending`: the 108 parts that have 211/216/251 decode 57,211 faces instead of 55,686, and 36 of
+  them become complete. The default mode is unchanged across the corpus (477,290 faces).

@@ -16,6 +16,7 @@
 //   521 loop        the closing int c always follows; c != 0: 4 f64, 4 ints, u8, 24 bytes
 //   knot vector     ints degree, a, x, n, b (b: the number of knots before parameter 0), f64 knots[n],
 //                   ints multiplicities[n]
+//   211, 216        as in the other compact layouts (cgm_compact.cpp)
 #include "formats/catia/cgm_compact.hpp"
 
 #include <string>
@@ -34,7 +35,11 @@ std::vector<std::uint32_t> abs_refs(In& in) {
 }
 
 // Knot vector -> i32 degree, a, x, n, b, f64 knots[n], i32 multiplicities[n]; returns n and b.
-std::pair<int, int> knot_vector(In& in, Out& o) {
+std::pair<int, int> knot_vector(In& in, Out& o, bool counted = false) {
+    if (counted) {  // 216: the section count precedes the knot vector
+        const std::int32_t c = in.i32();
+        o.i32(c);
+    }
     const int deg = in.i32(), a = in.i32(), x = in.i32(), n = in.i32(), b = in.i32();
     if (n < 2 || n > 100000 || deg < 1 || deg > 30) bad("knot vector size", in.at);
     o.i32(deg); o.i32(a); o.i32(x); o.i32(n); o.i32(b);
@@ -158,8 +163,22 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
         case 524: o.i16(in.i16()); break;
         case 525: o.i32(in.i32()); o.i16(in.i16()); break;
         // the decoder uses the references and the leading doubles of these (cgm_model.hpp)
-        case 10: case 12: case 100: case 155: case 200: case 201: case 202: case 203: case 204: case 210: case 211:
-        case 212: case 214: case 216: case 241: case 242: case 243: case 244: case 251: case 500: case 502:
+        case 216: {
+            const auto [n, b] = knot_vector(in, o, true);
+            (void)b;
+            f64s(in, o, 30 * std::size_t(n) + 4);
+            o.raw(in.raw(in.left()));
+            break;
+        }
+        case 211:
+            f64s(in, o, 16);
+            o.i32(in.i32()); o.i32(in.i32());
+            f64s(in, o, 4);
+            o.i32(in.i32());
+            f64s(in, o, 1);
+            break;
+        case 10: case 12: case 100: case 155: case 200: case 201: case 202: case 203: case 204: case 210:
+        case 212: case 214: case 241: case 242: case 243: case 244: case 251: case 500: case 502:
             o.raw(in.raw(in.left()));
             break;
         default:

@@ -52,14 +52,55 @@ std::size_t knot_vector(In& in, Out& o, int& n_out) {
     if (z & ~0x0cu) bad("knot-vector form byte", in.at);
     const int x = z & 4 ? 0 : in.i32();
     if (n < 2 || n > 100000 || deg < 1 || deg > 30) bad("knot vector size", in.at);
-    if (n > 2 && deg < 3) throw DecodeError(ErrorCode::Unsupported, "interior knot multiplicity of degree " + std::to_string(deg) + " not established", in.at);
     o.i32(deg); o.i32(0); o.i32(x); o.i32(n); o.i32(0);
     for (int i = 0; i < n; ++i) o.f64(in.f64());
-    if (!(z & 8) && in.u8() != 1) throw DecodeError(ErrorCode::Unsupported, "knot multiplicities not standard", in.at);
+    // multiplicities: standard (ends degree + 1, interior degree - 2) when bit 3 is set or a byte 1 follows;
+    // otherwise listed: raw-integer streams after a byte 0, compact streams directly
+    std::vector<int> mult;
+    bool standard = (z & 8) != 0;
+    if (!standard) {
+        in.need(1);
+        if (in.b[in.k] == 1) { ++in.k; standard = true; }
+        else {
+            if (!in.ci && in.u8() != 0) bad("knot multiplicity form", in.at);
+            for (int i = 0; i < n; ++i) mult.push_back(in.i32());
+        }
+    }
+    if (standard) {
+        if (n > 2 && deg < 3) throw DecodeError(ErrorCode::Unsupported, "interior knot multiplicity of degree " + std::to_string(deg) + " not established", in.at);
+        for (int i = 0; i < n; ++i) mult.push_back(i == 0 || i == n - 1 ? deg + 1 : deg - 2);
+    }
     std::size_t sum = 0;
-    for (int i = 0; i < n; ++i) { const int m = i == 0 || i == n - 1 ? deg + 1 : deg - 2; o.i32(m); sum += std::size_t(m); }
+    for (const int m : mult) {
+        if (m < 1 || m > deg + 1) bad("knot multiplicity", in.at);
+        o.i32(m);
+        sum += std::size_t(m);
+    }
+    if (sum < std::size_t(deg) + 2) bad("knot multiplicities", in.at);
     n_out = n;
     return sum - std::size_t(deg) - 1;
+}
+
+// 216 fillet: int n, knot vector (n knots, degree 5), sections P[n][10] D1[n][10] D2[n][10] (f64), then a
+// tail whose first four f64 are the parameter box u0 u1 v0 v1 (the rest is kept as written; not decoded).
+void fillet(In& in, Out& o) {
+    const int n = in.i32();
+    o.i32(n);
+    int nk = 0;
+    knot_vector(in, o, nk);
+    if (nk != n) bad("fillet section count differs from its knots", in.at);
+    for (int i = 0; i < 30 * n; ++i) o.f64(in.f64());
+    for (int i = 0; i < 4; ++i) o.f64(in.f64());
+    o.raw(in.raw(in.left()));
+}
+
+// 211 revolution: o X Y Z (12 f64), box (4 f64), int, int, k, 3 f64, int, f64 (cgm_model.hpp).
+void revolution(In& in, Out& o) {
+    for (int i = 0; i < 16; ++i) o.f64(in.f64());
+    o.i32(in.i32()); o.i32(in.i32());
+    for (int i = 0; i < 4; ++i) o.f64(in.f64());
+    o.i32(in.i32());
+    o.f64(in.f64());
 }
 
 // Edge curves (191, 192, 193). A map-1 entry may omit its identity range; the record length decides
@@ -459,7 +500,8 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
             if (cx) cx->box[r.id] = {v[1], v[2], v[3], v[4]};
             break;
         }
-        case 10: case 100: case 202: case 203: case 204: case 216: case 243:
+        case 216: fillet(in, o); break;
+        case 10: case 100: case 202: case 203: case 204: case 243:
             o.raw(in.raw(in.left()));
             if (cx) {
                 auto at = [&](int i) { return load_f64_le(o.p.data() + 8 * i); };
@@ -471,7 +513,8 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
             }
             break;
         // the decoder uses the references and the leading doubles of these (cgm_model.hpp)
-        case 12: case 155: case 210: case 211: case 212: c.refs = in.refs(1); o.raw(in.raw(in.left())); break;
+        case 211: c.refs = in.refs(1); revolution(in, o); break;
+        case 12: case 155: case 210: case 212: c.refs = in.refs(1); o.raw(in.raw(in.left())); break;
         case 214: c.refs = in.refs(2); o.raw(in.raw(in.left())); break;
         case 241: case 242: case 244: case 251: c.refs = in.refs(); o.raw(in.raw(in.left())); break;
         default:

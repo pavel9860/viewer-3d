@@ -1,6 +1,7 @@
 // CATIA CGMGeom: varint integers, framing and B-rep decode of corpus parts (skipped when the
 // samples folder is absent). Ground truth for the meshes is CATIA's stored tessellation
 // (research/cgm/compare_tess.py); these cases pin the decoded structure.
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -142,6 +143,48 @@ TEST_CASE("CGM compact corpus parts (2009Fall): compact and raw integers") {
             CHECK(ir.faces.size() == pt.faces);
             CHECK(ir.skipped.empty());
         }
+    }
+}
+
+TEST_CASE("CGM pending surface kinds: fillets (216) and revolutions (211)") {
+    // emitted only on request (the kernel does not evaluate them yet); by default their faces are skipped
+    const fs::path base = fs::path(CADCORE_SAMPLES_DIR) / "caa/caadoc/CAAElecHarnessItf.edu/CNext/resources/graphic";
+    const struct { const char* path; std::uint32_t kind; std::size_t faces, surfaces; } parts[] = {
+        {"CAA_EhiFLEXComputeBundleSegment_Sample/plug.CATPart", cgm::SurfFillet, 571, 28},
+        {"CAA_EHIMultiSegmentSample/hair-dryer.CATPart", cgm::SurfRevolution, 65, 6},
+    };
+    for (const auto& pt : parts) {
+        const fs::path p = base / pt.path;
+        if (!fs::exists(p)) continue;
+        const auto file = load(p);
+        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+        REQUIRE(st.has_value());
+        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
+        const cgm::Ir plain = cgm::decode(fr);
+        CHECK(plain.faces.size() < pt.faces);
+        for (const auto& s : plain.surfaces) CHECK(s.kind != pt.kind);
+        cgm::DecodeOptions opt;
+        opt.pending_kinds = true;
+        const cgm::Ir ir = cgm::decode(fr, {}, opt);
+        CHECK(ir.faces.size() == pt.faces);
+        CHECK(ir.skipped.empty());
+        std::size_t n = 0;
+        for (const auto& s : ir.surfaces) {
+            if (s.kind != pt.kind) continue;
+            ++n;
+            if (s.kind == cgm::SurfFillet) {
+                const std::size_t k = std::size_t(s.p.at(0));
+                REQUIRE(s.p.size() == 1 + 31 * k + 4);
+                // first section: both contact points at the same distance from the centre
+                auto d = [&](int a) { double t = 0; for (int j = 0; j < 3; ++j) { const double x = s.p[1 + k + a + j] - s.p[1 + k + 6 + j]; t += x * x; } return t; };
+                CHECK(std::abs(d(0) - d(3)) < 1e-9 * (1 + d(0)));
+            } else {
+                REQUIRE(s.p.size() >= 15);
+                const int pk = int(s.p[13]);
+                CHECK((pk >= 1 && pk <= 3));
+            }
+        }
+        CHECK(n == pt.surfaces);
     }
 }
 
