@@ -246,6 +246,14 @@ private:
                 // profile: a p-curve, or an edge curve whose first curve is one (same parameter)
                 std::uint32_t prof = first(o);
                 if (is_edge_curve(obj(prof).type)) prof = first(obj(prof));
+                if (const std::uint16_t t = obj(prof).type; t == 100 || t == 130) {
+                    // a 3D curve profile (the revolution's profile forms 2, 3)
+                    pending(o, "extrusion of a 3D curve");
+                    sf.kind = SurfExtrusionCurve;
+                    vec(3);
+                    profile(first(o), sf.p);
+                    break;
+                }
                 const double pc = double(pcurve(prof));
                 sf.kind = SurfExtrusion;
                 sf.p.push_back(pc);
@@ -455,9 +463,10 @@ private:
     double span_start(std::uint32_t c, std::int32_t span, std::size_t at) {
         const Obj& o = obj(c);
         if (is_edge_curve(o.type)) return span_start(first(o), span, at);
-        // B-spline segments start at their knots, the first one included (a knot range need not start at 0)
-        if (span == 1 && o.type != 170) return 0;
-        if (o.type == 160 || o.type == 170) {
+        // B-spline segments (2D 170, 3D 130) start at their knots, the first one included (a knot range
+        // need not start at 0)
+        if (span == 1 && o.type != 170 && o.type != 130) return 0;
+        if (o.type == 160 || o.type == 170 || o.type == 130) {
             Rd r = rd(o);
             if (o.type == 170) r.i16();
             const KnotVector kv = knot_vector(r);

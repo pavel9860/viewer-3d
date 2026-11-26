@@ -75,7 +75,7 @@ struct Out {
     }
 };
 
-// Tail of a 170 B-spline p-curve as stored (2009Fall, 2011Spring): int a, int b, f64 0 L 1 0 (L: a knot
+// Tail of a 170 B-spline p-curve and a 130 B-spline curve as stored (2009Fall, 2011Spring): int a, int b, f64 0 L 1 0 (L: a knot
 // interval), u8 c, [c != 0: further fields, kept as written; not decoded], int -2. The varint dialect's
 // form drops the closing -2.
 inline void bspline_pcurve_tail(In& in, Out& o) {

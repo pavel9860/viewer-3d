@@ -90,5 +90,17 @@ p(u, v) = A(u) + v (B(u) - A(u))
   neighbours within 1.1e-7 (4 parts, all three stored forms).
 - Emitted only with `--pending`.
 
+## 12: extrusion of a 3D curve (CGM class 210 whose profile is a 3D curve)
+
+```
+p = d[3] | profile          p(u, v) = C(u) + v d
+```
+
+- profile: as kind 9's, form 2 (3D line) or form 3 (3D B-spline, knots expanded); u is the curve's
+  parameter (the knot parameter for form 3).
+- Evidence: on assembly A part-9e0a, 398 of 401 coedges meet their neighbours within 1e-4. The other 3 have
+  vertex parameters that come through an edge-curve table map (map 5) and are off; that is open in
+  cadcore, not in the surface. Emitted only with `--pending`.
+
 ## Still open (not emitted)
 

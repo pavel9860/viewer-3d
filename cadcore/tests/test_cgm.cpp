@@ -188,6 +188,30 @@ TEST_CASE("CGM pending surface kinds: fillets (216) and revolutions (211)") {
     }
 }
 
+TEST_CASE("CGM compact 2017+ forms: loop blocks without ints, Hermite closing byte, fillet boxes") {
+    // 2017Fall+ loop blocks omit their 4 ints; 2018Fall+ Hermite curves end with a byte 0; carriers
+    // over fillets take the fillet's box (the last only with pending kinds: the fillets themselves)
+    const fs::path base = fs::path(CADCORE_SAMPLES_DIR);
+    const struct { const char* path; bool pending; std::size_t faces; } parts[] = {
+        {"github/catia-v5/HOLYNOTBAD__holydrone/Hardware/modules/misc/telemetry-cuav-air-link-4g-1.snapshot.3/Telemetry CUAV Air Link 4G.CATPart", false, 396},
+        {"nist/nist-ftc-ctc-pmi-cad-models/NIST-FTC-CTC-PMI-CAD-models/CATIA V5-6R2019/nist_ftc_07_asme1_rd_ct5290_ra.CATPart", false, 331},
+        {"local/d9dcb20f", true, 2286},
+    };
+    for (const auto& pt : parts) {
+        const fs::path p = base / pt.path;
+        if (!fs::exists(p)) continue;
+        const auto file = load(p);
+        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+        REQUIRE(st.has_value());
+        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
+        cgm::DecodeOptions opt;
+        opt.pending_kinds = pt.pending;
+        const cgm::Ir ir = cgm::decode(fr, {}, opt);
+        CHECK(ir.faces.size() == pt.faces);
+        CHECK(ir.skipped.empty());
+    }
+}
+
 TEST_CASE("CGM pending surface kind: ruled two-curve surfaces (243, 251)") {
     // one part per stored form: 2011Spring raw integers, 2015Fall packed, 2009Fall compact integers
     const fs::path base = fs::path(CADCORE_SAMPLES_DIR);

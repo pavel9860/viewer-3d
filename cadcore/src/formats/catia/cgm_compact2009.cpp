@@ -164,6 +164,16 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
             if (in.i16() != -2) bad("Hermite closing value", r.offset);
             break;
         }
+        case 130: {
+            const std::size_t np = knot_vector(in, o).poles;
+            const std::int32_t rat = in.i16();
+            o.i16(rat);
+            const std::size_t m = np * (rat ? 4 : 3);
+            if (m > in.left() / 8) bad("B-spline curve poles past the record", r.offset);
+            f64s(in, o, m);
+            bspline_pcurve_tail(in, o);
+            break;
+        }
         case 170: {
             if (in.i16() != 0) bad("B-spline p-curve form", r.offset);
             o.i16(0);

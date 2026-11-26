@@ -328,8 +328,11 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
             for (std::size_t j = 0; j < bt.size(); ++j) o.i16(pm(bt[j]));
             o.i16(cc);
             if (cc) {
+                // 4 f64, 4 ints, u8, 24 bytes (6 f32); 2017+ omit the ints (the record length decides:
+                // 25 bytes follow the doubles); the block is not decoded, omitted ints are written as 0
                 o.raw(in.raw(32));
-                for (int i = 0; i < 4; ++i) o.i32(in.i32());
+                const bool ints = in.left() != 25;
+                for (int i = 0; i < 4; ++i) o.i32(ints ? in.i32() : 0);
                 o.u8(in.u8());
                 o.raw(in.raw(24));
             }
@@ -427,6 +430,21 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
             o.f64(t0); o.f64(t1);
             if (cx) cx->range[r.id] = {t0, t1};
             if (in.i16() != -2) bad("Hermite closing value", r.offset);
+            // 2018Fall+ streams add a byte 0 after the closing value (not decoded)
+            if (in.left() == 1 && in.b[in.k] == 0) in.u8();
+            break;
+        }
+        case 130: {
+            // 3D B-spline curve: knot vector, int rational, poles[3], [weights], tail as 170's
+            int nk = 0;
+            const std::size_t np = knot_vector(in, o, nk);
+            const int rat = in.i16();
+            o.i16(rat);
+            const std::size_t m = np * (rat ? 4 : 3);
+            if (m > in.left() / 8) bad("B-spline curve poles past the record", r.offset);
+            for (std::size_t i = 0; i < m; ++i) o.f64(in.f64());
+            bspline_pcurve_tail(in, o);
+            if (cx) cx->range[r.id] = {load_f64_le(o.p.data() + 20), load_f64_le(o.p.data() + 20 + 8 * std::size_t(nk - 1))};
             break;
         }
         case 170: {
@@ -525,15 +543,16 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
             if (cx) cx->box[r.id] = {v[1], v[2], v[3], v[4]};
             break;
         }
-        case 216: sections(in, o, 10); break;
-        case 243:
-            sections(in, o, 6);
+        case 216: case 243: {
+            const int m = r.type == 216 ? 10 : 6;
+            sections(in, o, m);
             if (cx) {  // box: the four f64 after the sections
                 const std::size_t n = load_u32(o.p.data(), false);
-                const std::size_t box = 4 + 20 + 12 * n + 8 * 18 * n;
+                const std::size_t box = 4 + 20 + 12 * n + 8 * 3 * std::size_t(m) * n;
                 cx->box[r.id] = {load_f64_le(o.p.data() + box), load_f64_le(o.p.data() + box + 8), load_f64_le(o.p.data() + box + 16), load_f64_le(o.p.data() + box + 24)};
             }
             break;
+        }
         case 10: case 100: case 202: case 203: case 204:
             o.raw(in.raw(in.left()));
             if (cx) {
@@ -586,7 +605,7 @@ std::vector<CanonicalRecord> canonical_records(const Stream& s, const CompactLay
             try { In in{r.body, r.id, true, r.offset}; ++cx.edge_uses[in.ref()]; } catch (const DecodeError&) {}
         }
     auto pass = [](std::uint16_t t) {
-        if ((t >= 200 && t < 300) || t == 10 || t == 12 || t == 100) return 0;  // surfaces, points in space
+        if ((t >= 200 && t < 300) || t == 10 || t == 12 || (t >= 100 && t < 150)) return 0;  // surfaces, points and curves in space
         if (t >= 150 && t < 191) return 1;                                     // p-curves
         if (t >= 191 && t <= 193) return 2;                                    // edge curves
         if (t == 14 || t == 13) return 3;                                      // points on curves
@@ -629,7 +648,11 @@ std::vector<CanonicalRecord> canonical_records(const Stream& s, const CompactLay
                 auto rg = cx.range.find(prof);
                 if (rg == cx.range.end()) continue;
                 const std::uint8_t* q = out[i].c.payload.data();
-                cx.box[r.id] = {rg->second[0], rg->second[1], load_f64_le(q + 24), load_f64_le(q + 32)};
+                // an unbounded extrusion (the stream's infinite default, |v| >= 1e6) has no established v
+                // range: derived values on it stay unresolved (v = 0, the profile, fits some parts, not all)
+                const double v0 = load_f64_le(q + 24), v1 = load_f64_le(q + 32);
+                if (std::abs(v0) >= 1e6 || std::abs(v1) >= 1e6) continue;
+                cx.box[r.id] = {rg->second[0], rg->second[1], v0, v1};
                 added = true;
             }
             if (added)

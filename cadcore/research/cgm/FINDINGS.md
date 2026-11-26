@@ -220,6 +220,26 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   their neighbours within 1.1e-7 (4 parts). Default 477,491 -> 477,502 (11 faces in Guntle whose
   p-curves needed the 251 box); `--pending` 484,640 -> 485,920 faces, complete parts 1,062 -> 1,088.
   No part loses faces. One Guntle edge (sphere / cone, 2.9e-3) is as at HEAD.
+- 2017Fall+ loop blocks (521, closing c != 0) omit the 4 ints: 4 f64, u8, 24 bytes (6 f32) follow the
+  closing int (the record length decides; 2014/2015 streams keep the ints, mostly 1 1 1 1). 2018Fall+
+  Hermite curves (160) end with a byte 0 after the closing -2 (all 1,281 instances in 5 parts).
+- Fillets (216) give their carriers (241) the fillet's box u0 u1 v0 v1 (as 243 does for 251).
+- Code 22 = class 130 (3D B-spline curve, no references): knot vector, int rational, poles[3],
+  [weights], the 170 tail. It is the profile of extrusions (210) in 2015Fall parts; those emit as
+  IR kind 12 (d[3] | profile, `--pending`). Unbounded extrusions (stored v range the infinite
+  default) have no established v start: v = 0 (the profile) fits parts 32.x.x (edges within 8e-6) but
+  not assembly A part-9e0a (offsets about 1 along d), so no box is set and derived values on them stay
+  unresolved (before, the ±1e7 default was used silently). Open. On assembly A part-9e0a, 398 of 401
+  extrusion coedges meet their neighbours; 3 get vertex parameters through a table map (map 5) that
+  disagree with the stored ones (open).
+- 3D curves (100-149) transcode in the first pass (extrusion boxes need their ranges).
+- Results (these, HEAD 58c629b -> now): default 477,502 -> 479,480 faces, 1,011 -> 1,027 complete;
+  `--pending` 485,920 -> 488,806, 1,088 -> 1,109 complete; no part loses faces. On the parts that
+  gained default faces, coedges meet within 1e-4 everywhere except 2 project F part-5f03 edges, as at
+  HEAD.
+- Still open: 155 (composite p-curve: a coded list of operations, opcodes 1, 2, 3, 7, 0x141),
+  152 / code 26 (ellipse-like p-curve: c[2], angle, a, b, ..., t0 t1 s), codes 60 / 61 (surfaces
+  without old twins), 15 (a 3D curve used as revolution profile).
 - Results (B-splines): default mode 477,290 -> 477,491 faces, with no part losing any. The +201 faces in 8 parts
   have vertex parameters taken from B-spline knot ranges; their edges meet within 5.5e-7. With
   `--pending`: 478,815 -> 484,640 faces, and 1,047 -> 1,062 complete parts.

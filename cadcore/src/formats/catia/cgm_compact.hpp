@@ -22,7 +22,7 @@
 //   521 loop        refs, varint n, header byte (a, b: 0x41 (1,1), 0x50 (1,-1), 0xc1 (-1,1),
 //                   0xd0 (-1,-1)), bits for the i16 sequence after the first x (implied -1): per
 //                   coedge sense, y, next x, then the closing i16; int c; c != 0: block of 4 f64,
-//                   4 ints, u8, 24 bytes
+//                   4 ints (omitted in 2017+ streams: 25 bytes follow the f64), u8, 24 bytes
 //   524, 525        ref(s), the i16 / i32 fields as ints
 //   191-193 edge curves  refs, header byte h (bit 3: one map, count omitted; bit 2: map 0, map
 //                   code omitted; bit 0: the record's last tolerance is zero and omitted); per map:
@@ -33,7 +33,10 @@
 //                   [s], offset
 //   knot vector     int degree, int n, u8 z (4: x = 0, omitted; 0: int x follows), f64 knots[n], u8 1
 //                   (standard multiplicities: ends degree + 1, interior degree - 2)
-//   160 Hermite     ref, knot vector, i16 n, i16 x, P D1, int has2, [D2], t0 t1, i16 -2
+//   160 Hermite     ref, knot vector, i16 n, i16 x, P D1, int has2, [D2], t0 t1, i16 -2 (2018Fall+:
+//                   then a byte 0)
+//   130 B-spline    (code 22, no refs) knot vector, int rational, poles[np][3], [weights], tail as 170
+//   curve
 //   170 B-spline    ref, i16 0, knot vector, poles[np][2] (f64), int a, int b, f64 0 L 1 0, u8 c, [c != 0:
 //   p-curve         further fields, not decoded], int -2
 //   231 NURBS       knot vectors u v, int rational, poles (v fastest), [weights], a 152- or 154-byte

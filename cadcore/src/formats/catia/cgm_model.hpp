@@ -74,6 +74,8 @@ enum SurfaceKind : std::uint32_t {
     SurfRuled = 11,     // n | knots[n] | P[n][6] | D1[n][6] | D2[n][6] | u0 u1 v0 v1
                         //   (A, B)(u) = C2 quintic Hermite of the 6 values (A[3] B[3]), as SurfFillet;
                         //   p(u, v) = A(u) + v (B(u) - A(u)) (CGM 243, and 251 through its 243)
+    SurfExtrusionCurve = 12, // d[3] | profile       p = C(u) + v d (CGM 210 whose profile is a 3D curve;
+                             //   profile as SurfRevolution's, forms 2 and 3)
     SurfFillet = 10,    // n | knots[n] | P[n][10] | D1[n][10] | D2[n][10] | u0 u1 v0 v1
                         //   section(u) = C2 quintic Hermite of the 10 values (p1[3] p2[3] c[3] angle), as
                         //   PcHermite; p(u, v) = c + (sin(th - f) (p1 - c) + sin f (p2 - c)) / sin th,
