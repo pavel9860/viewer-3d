@@ -95,6 +95,25 @@ TEST_CASE("CGM compact corpus part (2011Spring): B-rep decode") {
     CHECK(ir.skipped.empty());
 }
 
+TEST_CASE("CGM compact corpus part (2011Fall): B-rep decode") {
+    const fs::path p = fs::path(CADCORE_SAMPLES_DIR) / "caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Nut.CATPart";
+    if (!fs::exists(p)) return;
+    const auto file = load(p);
+    const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+    REQUIRE(st.has_value());
+    const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
+    REQUIRE(fr.features.size() >= 3);
+    CHECK(fr.features[0] == 0x06);
+    const auto layout = cgm::compact_layout(fr);
+    REQUIRE(layout.has_value());
+    CHECK(layout->compact_ints);
+    CHECK(layout->edge_curve_ref);
+    CHECK(!layout->derived);
+    const cgm::Ir ir = cgm::decode(fr);
+    CHECK(ir.faces.size() == 40);
+    CHECK(ir.skipped.empty());
+}
+
 TEST_CASE("CGM points: parameters are offsets within a Hermite segment") {
     // Points store (offset, segment number); segment numbers are shifted by the knot vector's offset
     // field (-7 on trimmed curves of this part). Every coedge range must lie on its Hermite curve.

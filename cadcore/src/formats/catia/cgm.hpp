@@ -20,8 +20,8 @@
 //           74..82: the id field is the signed delta from the previous id (compact integer,
 //           cgm_compact.hpp); 2009Fall (levels 83..85) ids are absolute. Bodies: 2011 and later
 //           decode through cgm_compact (per-file feature bytes after the version strings,
-//           `Stream.features`); 2009Fall (varint reference lists, packed fields) and 2011Fall
-//           (06 b5 75) are not decoded yet.
+//           `Stream.features`); 2009Fall (varint reference lists, packed fields)
+//           is not decoded yet.
 //   fixed   (CXR4/5, CGA-V2R4): fixed-width records  u32 id  u16 type  b3 00 ...; recognised
 //           but not framed yet (the header's padding before the length varies).
 //

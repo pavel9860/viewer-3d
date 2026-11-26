@@ -251,8 +251,10 @@ std::optional<CompactLayout> compact_layout(const Stream& s) {
     // 2011Spring streams: feature bytes b5|bf 75|77 (bit 3 of byte 0: compact integers; bit 1 of
     // byte 1: edges without their edge-curve reference).
     if ((f0 == 0xb5 || f0 == 0xbf) && (f1 == 0x75 || f1 == 0x77)) return CompactLayout{(f0 & 8) != 0, (f1 & 2) == 0, false};
-    // 2012+ streams: 08 b5 75 (then container GUIDs)
-    if (f0 == 0x08 && s.features.size() >= 3 && f1 == 0xb5 && s.features[2] == 0x75) return CompactLayout{true, true, true};
+    // Streams with a leading format byte, then b5 75: 06 (2011Fall) and 08 (2012+, container GUIDs follow).
+    // Both write compact integers and keep the edges' edge-curve reference; 08 also omits derived values.
+    if ((f0 == 0x06 || f0 == 0x08) && s.features.size() >= 3 && f1 == 0xb5 && s.features[2] == 0x75)
+        return CompactLayout{true, true, f0 == 0x08};
     return std::nullopt;
 }
 

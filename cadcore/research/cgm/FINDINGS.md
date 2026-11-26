@@ -151,3 +151,11 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
 - Volume vs stored tessellation is biased by CATIA's coarse mesh (a 10-gon around a cylinder: +6.9%;
   thin walls: up to 10%). Stored vertices lying on the decoded surfaces is the sharper check: of 49
   meshing 2011Spring parts marked off, 40 had every stored vertex on the surfaces.
+
+## 2011Fall compact layout (feature bytes 06 b5 75)
+- The 2011Spring body grammar, with compact integers and edges keeping their edge-curve reference;
+  no derived values (those start with 08, 2012+). Of the 8 layout combinations, only this one decodes
+  any face: all faces of the 4 distinct parts (8 files) decode, with no skipped records.
+- vs stored tessellation: all 4 are closed (no open edges), and every stored vertex is within 1.4e-4 of
+  our mesh (well under 1e-3 of the diagonal). The volume differences (0.02% to 3.4%) come from
+  CATIA's coarse stored mesh.

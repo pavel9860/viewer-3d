@@ -83,7 +83,8 @@ struct CompactLayout {
 };
 
 // The layout of a compact stream whose bodies this module decodes (2011Spring: b5|bf 75|77;
-// 2012+: 08 b5 75); nullopt otherwise (2009Fall and 2011Fall streams, not decoded yet).
+// 2011Fall: 06 b5 75, the 2011Spring grammar with compact integers and edge-curve references;
+// 2012+: 08 b5 75); nullopt otherwise (2009Fall streams, not decoded yet).
 std::optional<CompactLayout> compact_layout(const Stream& s);
 
 struct Canonical {
