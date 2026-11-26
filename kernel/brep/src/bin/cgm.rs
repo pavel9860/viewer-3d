@@ -58,6 +58,10 @@ fn main() {
                 None => eprintln!("orient none"),
             }
         }
+        if std::env::var("CGM_OPEN").is_ok() {
+            let c = brep::cgm_mesh::open_causes(&mesh);
+            eprintln!("open edges: {} on edges whose other face is not meshed ({} edges), {} on edges of two faces ({} edges: {:?}), {} inside faces", c.lone, c.lone_edges.len(), c.joined, c.joined_edges.len(), &c.joined_edges[..c.joined_edges.len().min(20)], c.inside);
+        }
         for (id, why) in &mesh.failed { eprintln!("{f}: face {id}: {why}"); }
         if let Some(out) = &stl {
             let mut w = std::io::BufWriter::new(std::fs::File::create(out).expect("cannot create the STL"));

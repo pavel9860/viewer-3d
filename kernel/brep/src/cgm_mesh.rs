@@ -21,6 +21,37 @@ pub struct Mesh {
     pub faces: Vec<(u32, i32, i32, i32, i32)>,
     /// faces that could not be triangulated, with the reason
     pub failed: Vec<(u32, String)>,
+    /// per sampled B-rep edge: the edge index and its mesh points in order
+    pub edge_pts: Vec<(usize, Vec<u32>)>,
+    /// per sampled B-rep edge: how many coedges of the meshed faces use it
+    pub edge_uses: HashMap<usize, u32>,
+}
+
+/// open mesh edges by cause: on a B-rep edge used by one meshed coedge (its other face is not in the mesh), on a
+/// B-rep edge used by two or more (the tessellation does not join), or not on a B-rep edge (inside a face)
+#[derive(Debug, Default)]
+pub struct OpenCauses { pub lone: usize, pub joined: usize, pub inside: usize, pub lone_edges: Vec<usize>, pub joined_edges: Vec<usize> }
+
+pub fn open_causes(m: &Mesh) -> OpenCauses {
+    let mut uses: HashMap<(u32, u32), i32> = HashMap::new();
+    for t in &m.tris { for k in 0..3 { let (i, j) = (t[k], t[(k + 1) % 3]); *uses.entry((i.min(j), i.max(j))).or_default() += 1; } }
+    let mut on: HashMap<(u32, u32), usize> = HashMap::new();
+    for (e, pts) in &m.edge_pts { for w in pts.windows(2) { on.insert((w[0].min(w[1]), w[0].max(w[1])), *e); } }
+    let mut c = OpenCauses::default();
+    let mut keys: Vec<_> = uses.iter().filter(|x| *x.1 == 1).map(|x| *x.0).collect();
+    keys.sort_unstable();
+    for k in keys {
+        match on.get(&k) {
+            None => c.inside += 1,
+            Some(&e) if m.edge_uses.get(&e).copied().unwrap_or(0) < 2 => { c.lone += 1; c.lone_edges.push(e); }
+            Some(&e) => { c.joined += 1; c.joined_edges.push(e); }
+        }
+    }
+    c.lone_edges.sort_unstable();
+    c.lone_edges.dedup();
+    c.joined_edges.sort_unstable();
+    c.joined_edges.dedup();
+    c
 }
 
 /// closure and size measures of a mesh
@@ -101,7 +132,7 @@ pub fn shown_shells(m: &Model, sheets: bool) -> Vec<usize> {
 
 /// meshes the faces of the given shells
 pub fn tessellate(m: &Model, sag: f64, shells: &[usize]) -> Mesh {
-    let mut out = Mesh { p: vec![], tris: vec![], tri_face: vec![], faces: vec![], failed: vec![] };
+    let mut out = Mesh { p: vec![], tris: vec![], tri_face: vec![], faces: vec![], failed: vec![], edge_pts: vec![], edge_uses: HashMap::new() };
     let mut vtx: Vec<Option<u32>> = vec![None; m.vertices];
     let mut edges: HashMap<usize, EdgeSamples> = HashMap::new();
     // faces of the shells, each once
@@ -110,6 +141,7 @@ pub fn tessellate(m: &Model, sag: f64, shells: &[usize]) -> Mesh {
     let coedges: Vec<usize> = faces.iter().flat_map(|&(f, _)| m.faces[f].loops.iter().flat_map(|l| l.clone())).collect();
     for c in coedges {
         let ce = &m.coedges[c];
+        *out.edge_uses.entry(ce.edge).or_default() += 1;
         if edges.contains_key(&ce.edge) { continue; }
         let f = sample(|t| m.point(ce, t), ce.t[0], ce.t[1], sag);
         let ends = m.edges[ce.edge];
@@ -122,6 +154,7 @@ pub fn tessellate(m: &Model, sag: f64, shells: &[usize]) -> Mesh {
                 None => new(&mut out),
             });
         }
+        out.edge_pts.push((ce.edge, idx.clone()));
         edges.insert(ce.edge, EdgeSamples { f, idx });
     }
     for &(fi, shell_sense) in &faces {
