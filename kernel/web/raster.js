@@ -1,9 +1,10 @@
 // CPU renderer for kernel meshes (used when WebGL is unavailable, and as the tested reference path).
 //
-// Exact coverage: vertices are snapped to 1/16 pixel and edge functions are evaluated in integers (exact in doubles),
-// with a top-left fill rule, so the triangles of a watertight mesh cover every pixel centre exactly once: no cracks,
-// no double coverage. Depth is 1/z interpolated in screen space (perspective-correct). Triangles crossing the near
-// plane are clipped against it. Closed meshes skip back faces. Every vertex is transformed once per frame.
+// The rasterizer is kcore::raster (Rust, compiled into k.wasm): exact 1/16-pixel coverage with a top-left rule, 1/z
+// depth, near-plane clipping, back faces culled on closed meshes. Sort-middle over workers in shared memory: each
+// worker bins a contiguous range of triangles to screen bands, then draws its own interleaved bands from every
+// range in triangle order. The frame is bit-identical for any number of workers; without cross-origin isolation it
+// runs on the calling thread.
 
 /** parse a `brep mesh --out` file: u32 nv, u32 nt, f32 xyz*nv, u32 3*nt, u32 face*nt; normalized to the unit sphere */
 export function prepare(buffer) {
@@ -49,119 +50,159 @@ export function camera(rot, pan, dist) {
 }
 
 export const NEAR = 1e-3;
-const SUB = 16; // sub-pixel precision of snapped vertices
+const MB = 1 << 20, HEAP = 16 * MB, CAM_BYTES = 128;
 
-/**
- * render into colour (ABGR u32), depth (1/z, 0 = empty) and triangle id (-1 = empty) buffers of w x h.
- * opts: { edges: bool, faces: bool (face colours), twoSided: bool }
- */
-export function render(m, cam, w, h, opts = {}, out = null) {
-  const n = w * h;
-  if (!out || out.w !== w || out.h !== h) out = { w, h, color: new Uint32Array(n), depth: new Float32Array(n), id: new Int32Array(n) };
-  const { color, depth, id } = out;
-  color.fill(0xff211d1b); depth.fill(0); id.fill(-1);
-  const { nv, nt, V, T, N, C } = m, r = cam.r, tr = cam.t;
-  const f = (h / 2) / cam.tanHalf, cxs = w / 2, cys = h / 2;
-  // camera-space and screen positions of every vertex, once
-  const X = new Float64Array(nv), Y = new Float64Array(nv), Z = new Float64Array(nv), SX = new Float64Array(nv), SY = new Float64Array(nv);
-  for (let i = 0; i < nv; i++) {
-    const x = V[3 * i], y = V[3 * i + 1], z = V[3 * i + 2];
-    const cx = r[0] * x + r[1] * y + r[2] * z + tr[0], cy = r[3] * x + r[4] * y + r[5] * z + tr[1], cz = r[6] * x + r[7] * y + r[8] * z + tr[2];
-    X[i] = cx; Y[i] = cy; Z[i] = -cz;
-    if (-cz > NEAR) { SX[i] = Math.round((cxs + f * cx / -cz) * SUB); SY[i] = Math.round((cys - f * cy / -cz) * SUB); }
-  }
-  // back faces are hidden by front faces only when the eye is outside the (closed) model: test its bounding box
-  const e = [-(r[0] * tr[0] + r[3] * tr[1] + r[6] * tr[2]), -(r[1] * tr[0] + r[4] * tr[1] + r[7] * tr[2]), -(r[2] * tr[0] + r[5] * tr[1] + r[8] * tr[2])];
-  const inside = [0, 1, 2].every(k => e[k] >= m.lo[k] && e[k] <= m.hi[k]);
-  const cull = m.closed && !opts.twoSided && !inside, edges = !!opts.edges, faces = opts.faces !== false;
-  const L = [0.4 / 1.2329, 0.6 / 1.2329, 1 / 1.2329];
-  const poly = new Float64Array(4 * 3); // clipped polygon in camera space
-  const sx = new Float64Array(4), sy = new Float64Array(4), iz = new Float64Array(4);
-  let drawn = 0;
-  for (let t = 0; t < nt; t++) {
-    const a = T[3 * t], b = T[3 * t + 1], c = T[3 * t + 2];
-    const za = Z[a], zb = Z[b], zc = Z[c];
-    if (za <= NEAR && zb <= NEAR && zc <= NEAR) continue;
-    const nx = r[0] * N[3 * t] + r[1] * N[3 * t + 1] + r[2] * N[3 * t + 2], ny = r[3] * N[3 * t] + r[4] * N[3 * t + 1] + r[5] * N[3 * t + 2], nz = r[6] * N[3 * t] + r[7] * N[3 * t + 1] + r[8] * N[3 * t + 2];
-    const d = 0.25 + 0.75 * Math.abs(nx * L[0] + ny * L[1] + nz * L[2]);
-    const cr = faces ? C[3 * t] : 0.8, cg = faces ? C[3 * t + 1] : 0.8, cb = faces ? C[3 * t + 2] : 0.8;
-    const rgb = (0xff000000 | (Math.min(255, (cb * d * 255) | 0) << 16) | (Math.min(255, (cg * d * 255) | 0) << 8) | Math.min(255, (cr * d * 255) | 0)) >>> 0;
-    let k;
-    if (za > NEAR && zb > NEAR && zc > NEAR) {
-      sx[0] = SX[a]; sy[0] = SY[a]; iz[0] = 1 / za; sx[1] = SX[b]; sy[1] = SY[b]; iz[1] = 1 / zb; sx[2] = SX[c]; sy[2] = SY[c]; iz[2] = 1 / zc;
-      k = 3;
-    } else {
-      // clip against the near plane (Sutherland-Hodgman), at most 4 vertices
-      k = 0;
-      const vs = [a, b, c];
-      for (let j = 0; j < 3; j++) {
-        const p = vs[j], q = vs[(j + 1) % 3], pin = Z[p] > NEAR, qin = Z[q] > NEAR;
-        if (pin) { poly[3 * k] = X[p]; poly[3 * k + 1] = Y[p]; poly[3 * k + 2] = Z[p]; k++; }
-        if (pin !== qin) {
-          // computed from the lower vertex index, so both triangles of a shared edge get the identical point
-          const [u, v] = p < q ? [p, q] : [q, p], s = (NEAR - Z[u]) / (Z[v] - Z[u]);
-          poly[3 * k] = X[u] + s * (X[v] - X[u]); poly[3 * k + 1] = Y[u] + s * (Y[v] - Y[u]); poly[3 * k + 2] = NEAR; k++;
-        }
-      }
-      for (let j = 0; j < k; j++) { const z = poly[3 * j + 2]; sx[j] = Math.round((cxs + f * poly[3 * j] / z) * SUB); sy[j] = Math.round((cys - f * poly[3 * j + 1] / z) * SUB); iz[j] = 1 / z; }
+// Threads: the calling thread is thread 0, workers are threads 1..3. A frame is started through a control block in
+// shared memory (no message round trips): CTL = [generation, argument block, bin done, draw done]. Each thread bins
+// its triangle range, waits until every range is binned, then draws its bands.
+const workerSrc = `
+  onmessage = async ({ data: m }) => {
+    const X = (await WebAssembly.instantiate(m.mod, { env: { memory: m.mem } })).exports;
+    X.__stack_pointer.value = m.sp;
+    const ctl = new Int32Array(m.mem.buffer, m.ctl, 8);
+    postMessage(0);
+    let seen = Atomics.load(ctl, 0);
+    for (;;) {
+      Atomics.wait(ctl, 0, seen);
+      seen = Atomics.load(ctl, 0);
+      const U = new Uint32Array(m.mem.buffer), a = Atomics.load(ctl, 1) >>> 2, nw = U[a + 9], i = m.index;
+      if (i >= nw) continue;
+      X.raster_bin(U[a], U[a + 1], U[a + 2], U[a + 3], U[a + 4], U[a + 5], U[a + 6], U[a + 7], U[a + 11 + i], U[a + 8] + 28 * i, U[a + 11 + nw + 2 * i], U[a + 12 + nw + 2 * i]);
+      Atomics.add(ctl, 2, 1); Atomics.notify(ctl, 2);
+      for (let v; (v = Atomics.load(ctl, 2)) < nw;) Atomics.wait(ctl, 2, v);
+      // a band list pool overflowed: the calling thread grows it and starts the frame again
+      let ok = 1;
+      for (let k = 0; k < nw; k++) if (U[(U[a + 8] >>> 2) + 7 * k + 5] > U[(U[a + 8] >>> 2) + 7 * k + 4]) ok = 0;
+      if (ok) X.raster_draw(U[a], U[a + 8], nw, U[a + 10], i, nw);
+      Atomics.add(ctl, 3, 1); Atomics.notify(ctl, 3);
     }
-    for (let j = 1; j + 1 < k; j++) drawn += tri(sx[0], sy[0], iz[0], sx[j], sy[j], iz[j], sx[j + 1], sy[j + 1], iz[j + 1], rgb, t, edges, cull, w, h, color, depth, id);
+  };`;
+
+let shared = null; // { mod, mem, X, workers, ctl, top }
+async function runtime(nthreads) {
+  if (shared) return shared;
+  const mod = await WebAssembly.compile(await (await fetch(new URL('k.wasm', import.meta.url))).arrayBuffer());
+  const iso = self.crossOriginIsolated === true && typeof SharedArrayBuffer === 'function';
+  const mem = new WebAssembly.Memory({ initial: HEAP / 65536, maximum: 65536, shared: iso });
+  const X = (await WebAssembly.instantiate(mod, { env: { memory: mem } })).exports;
+  const rt = { mod, mem, X, workers: [], top: HEAP };
+  rt.ctl = alloc(rt, 64);
+  if (iso && nthreads > 1) {
+    const url = URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' }));
+    rt.workers = await Promise.all([...Array(nthreads - 1).keys()].map(i => new Promise(r => {
+      const w = new Worker(url); w.onmessage = () => r(w); w.postMessage({ mod, mem, sp: 8 * MB + (i + 1) * MB, ctl: rt.ctl, index: i + 1 });
+    })));
   }
-  out.drawn = drawn;
-  return out;
+  return (shared = rt);
+}
+function alloc(rt, bytes) {
+  const p = rt.top; rt.top += Math.ceil(bytes / 64) * 64;
+  if (rt.top > rt.mem.buffer.byteLength) rt.mem.grow(Math.ceil((rt.top - rt.mem.buffer.byteLength) / 65536));
+  return p;
 }
 
-// one triangle in 1/16-pixel integer coordinates: span rasterization with exact edge functions and a top-left rule
-function tri(x0, y0, z0, x1, y1, z1, x2, y2, z2, rgb, tid, edges, cull, w, h, color, depth, id) {
-  // orient counter-clockwise in screen space (y down): area > 0
-  let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-  if (area === 0) return 0;
-  // back face, decided on the snapped screen triangle (the same data as coverage, so a closed mesh still covers
-  // every pixel exactly once): a front face is counter-clockwise seen from the eye, i.e. negative area with y down
-  if (cull && area > 0) return 0;
-  if (area < 0) { let t = x1; x1 = x2; x2 = t; t = y1; y1 = y2; y2 = t; t = z1; z1 = z2; z2 = t; area = -area; }
-  const minx = Math.max(0, Math.ceil((Math.min(x0, x1, x2) / SUB) - 0.5)), maxx = Math.min(w - 1, Math.floor((Math.max(x0, x1, x2) / SUB) - 0.5));
-  const miny = Math.max(0, Math.ceil((Math.min(y0, y1, y2) / SUB) - 0.5)), maxy = Math.min(h - 1, Math.floor((Math.max(y0, y1, y2) / SUB) - 0.5));
-  if (minx > maxx || miny > maxy) return 0;
-  // edge e_k opposite vertex k: E(p) = (b - a) x (p - a) with (a, b) = next vertices; A = dE/dx, B = dE/dy (per pixel)
-  const A0 = (y1 - y2) * SUB, B0 = (x2 - x1) * SUB, A1 = (y2 - y0) * SUB, B1 = (x0 - x2) * SUB, A2 = (y0 - y1) * SUB, B2 = (x1 - x0) * SUB;
-  // top-left rule: on an edge that is not top or left, the boundary itself is outside (bias -1 on exact integers)
-  const tl = (dx, dy) => (dy < 0 || (dy === 0 && dx > 0)) ? 0 : -1;
-  const o0 = tl(x2 - x1, y2 - y1), o1 = tl(x0 - x2, y0 - y2), o2 = tl(x1 - x0, y1 - y0);
-  const px = minx * SUB + SUB / 2, py = miny * SUB + SUB / 2;
-  let r0 = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1) + o0;
-  let r1 = (x0 - x2) * (py - y2) - (y0 - y2) * (px - x2) + o1;
-  let r2 = (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0) + o2;
-  // E_k increases by A_k per pixel in x and by B_k per row in y; inside: all three >= 0
-  const inv = 1 / area;
-  const w0 = 0.6 * SUB * Math.hypot(x2 - x1, y2 - y1), w1 = 0.6 * SUB * Math.hypot(x0 - x2, y0 - y2), w2 = 0.6 * SUB * Math.hypot(x1 - x0, y1 - y0); // 0.6 px edge lines
-  const dzdx = (A0 * z0 + A1 * z1 + A2 * z2) * inv;
-  const zlo = Math.min(z0, z1, z2), zhi = Math.max(z0, z1, z2);
-  let covered = 0;
-  for (let y = miny; y <= maxy; y++, r0 += B0, r1 += B1, r2 += B2) {
-    // x range where r + A (x - minx) >= 0 for all three edges
-    let xs = minx, xe = maxx;
-    if (A0 > 0) xs = Math.max(xs, minx + Math.ceil(-r0 / A0)); else if (A0 < 0) xe = Math.min(xe, minx + Math.floor(r0 / -A0)); else if (r0 < 0) continue;
-    if (A1 > 0) xs = Math.max(xs, minx + Math.ceil(-r1 / A1)); else if (A1 < 0) xe = Math.min(xe, minx + Math.floor(r1 / -A1)); else if (r1 < 0) continue;
-    if (A2 > 0) xs = Math.max(xs, minx + Math.ceil(-r2 / A2)); else if (A2 < 0) xe = Math.min(xe, minx + Math.floor(r2 / -A2)); else if (r2 < 0) continue;
-    // the divisions may round either way: widen by one pixel, then shrink with the exact integer test
-    xs = Math.max(minx, xs - 1); xe = Math.min(maxx, xe + 1);
-    while (xs <= xe && (r0 + A0 * (xs - minx) < 0 || r1 + A1 * (xs - minx) < 0 || r2 + A2 * (xs - minx) < 0)) xs++;
-    while (xe >= xs && (r0 + A0 * (xe - minx) < 0 || r1 + A1 * (xe - minx) < 0 || r2 + A2 * (xe - minx) < 0)) xe--;
-    if (xs > xe) continue;
-    let e0 = r0 + A0 * (xs - minx), e1 = r1 + A1 * (xs - minx), e2 = r2 + A2 * (xs - minx);
-    // depth from the unbiased edge values (the fill-rule bias of -1 is not geometry)
-    let z = ((e0 - o0) * z0 + (e1 - o1) * z1 + (e2 - o2) * z2) * inv;
-    let o = y * w + xs;
-    for (let x = xs; x <= xe; x++, o++, e0 += A0, e1 += A1, e2 += A2, z += dzdx) {
-      // a near-degenerate triangle's snapped barycentrics can extrapolate: depth stays within its vertex depths
-      const zc = z < zlo ? zlo : z > zhi ? zhi : z;
-      if (zc > depth[o]) {
-        depth[o] = zc; id[o] = tid;
-        color[o] = edges && (e0 < w0 || e1 < w1 || e2 < w2) ? 0xff100f0d : rgb;
-        covered++;
-      }
+/**
+ * a renderer for one mesh: `await createRenderer(m)`, then `await r.render(cam, w, h, opts)`.
+ * Reorders m in place: triangles (T, N, C, F) into the culling-friendly draw order (m.perm: new -> old index) and
+ * vertices (V) by first use (m.vperm: new -> old index).
+ */
+export async function createRenderer(m, nthreads = 4) {
+  const rt = await runtime(4);
+  const nw = Math.max(1, Math.min(nthreads, rt.workers.length + 1));
+  const X = rt.X, { nv, nt } = m;
+  const VTX = X.raster_sizes(0), REC = X.raster_sizes(1), CLB = X.raster_sizes(2), CL = X.raster_sizes(3), RPT = X.raster_sizes(4);
+  const BH = 16, DESC = 7;
+  const u8 = () => new Uint8Array(rt.mem.buffer), u32 = () => new Uint32Array(rt.mem.buffer);
+  const put = arr => { const p = alloc(rt, arr.byteLength); u8().set(new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength), p); return p; };
+  if (!m.perm) {
+    const pv0 = put(m.V), pt0 = put(m.T), pf0 = put(m.F), pk = alloc(rt, 16 * nt), pp = alloc(rt, 4 * nt);
+    X.raster_order(pv0, pt0, pf0, nv, nt, pk, pp);
+    const perm = new Uint32Array(rt.mem.buffer, pp, nt).slice();
+    const T = new Uint32Array(3 * nt), F = new Uint32Array(nt), N = new Float64Array(3 * nt), C = new Float32Array(3 * nt);
+    for (let k = 0; k < nt; k++) {
+      const o = perm[k];
+      F[k] = m.F[o];
+      for (let j = 0; j < 3; j++) { T[3 * k + j] = m.T[3 * o + j]; N[3 * k + j] = m.N[3 * o + j]; C[3 * k + j] = m.C[3 * o + j]; }
+    }
+    // vertices in first-use order: the per-frame vertex cache is then read nearly sequentially
+    const ptn = put(T), pnew = alloc(rt, 4 * nv), pold = alloc(rt, 4 * nv);
+    X.raster_renumber(ptn, nv, nt, pnew, pold);
+    const old = new Uint32Array(rt.mem.buffer, pold, nv), V = new Float64Array(3 * nv);
+    for (let i = 0; i < nv; i++) for (let j = 0; j < 3; j++) V[3 * i + j] = m.V[3 * old[i] + j];
+    T.set(new Uint32Array(rt.mem.buffer, ptn, 3 * nt));
+    Object.assign(m, { T, F, N, C, V, perm, vperm: old.slice() });
+  }
+  const pv = put(m.V);
+  const pt = put(m.T), pn = put(m.N), pc = put(m.C);
+  const pcl = alloc(rt, CLB * Math.ceil(nt / CL));
+  X.raster_clusters(pv, pt, pn, pc, nv, nt, pcl);
+  // contiguous triangle ranges (whole clusters), one per thread; their order is the draw order
+  const ncl = Math.ceil(nt / CL);
+  const ranges = [...Array(nw)].map((_, i) => [Math.min(nt, CL * Math.floor(ncl * i / nw)), Math.min(nt, CL * Math.floor(ncl * (i + 1) / nw))]);
+  const caches = ranges.map(() => { const p = alloc(rt, VTX * nv); u8().fill(0, p, p + VTX * nv); return p; });
+  const pcam = alloc(rt, CAM_BYTES), pdesc = alloc(rt, 4 * DESC * nw), parg = alloc(rt, 4 * (11 + 3 * nw));
+  const recs = ranges.map(([a, b]) => RPT * (b - a) + 1);
+  const chunk = recs.map(n => ({ rec: alloc(rt, REC * n), head: 0, tail: 0, pool: 0, np: 0 }));
+  let nbCap = 0, frame = 0, cap = 0, frameNo = 0;
+  const setDesc = () => { const U = u32(); chunk.forEach((c, i) => U.set([c.rec, c.head, c.tail, c.pool, c.np, 0, recs[i]], pdesc / 4 + DESC * i)); };
+  const growPool = (c, n) => { c.np = n; c.pool = alloc(rt, 8 * n); };
+  chunk.forEach((c, i) => growPool(c, recs[i] + 1024));
+  const ctl = () => new Int32Array(rt.mem.buffer, rt.ctl, 8);
+
+  // one frame on all threads; false when a band list pool overflowed (grown here: the caller renders again)
+  // wait without spinning (a spinning thread competes with the workers for cores)
+  async function until(c, k, n) {
+    for (let v; (v = Atomics.load(c, k)) < n;) {
+      const r = Atomics.waitAsync(c, k, v);
+      if (r.async) await r.value;
     }
   }
-  return covered;
+  async function run() {
+    setDesc();
+    u32().set([pcam, pv, pt, pn, pc, nv, nt, pcl, pdesc, nw, frame, ...caches, ...ranges.flat()], parg / 4);
+    const c = ctl();
+    if (nw > 1) {
+      Atomics.store(c, 1, parg); Atomics.store(c, 2, 0); Atomics.store(c, 3, 0);
+      Atomics.add(c, 0, 1); Atomics.notify(c, 0);
+    }
+    X.raster_bin(pcam, pv, pt, pn, pc, nv, nt, pcl, caches[0], pdesc, ranges[0][0], ranges[0][1]);
+    if (nw > 1) {
+      Atomics.add(c, 2, 1); Atomics.notify(c, 2);
+      await until(c, 2, nw);
+    }
+    const D = u32();
+    const over = chunk.map((_, i) => D[pdesc / 4 + DESC * i + 5]).map((need, i) => need > chunk[i].np ? need : 0);
+    if (!over.some(Boolean)) X.raster_draw(pcam, pdesc, nw, frame, 0, nw);
+    if (nw > 1) await until(c, 3, nw - 1);
+    over.forEach((need, i) => { if (need) growPool(chunk[i], need + (need >> 2)); });
+    return !over.some(Boolean);
+  }
+
+  async function render(cam, w, h, opts = {}) {
+    const nb = Math.ceil(h / BH);
+    if (nb > nbCap) { nbCap = nb; for (const c of chunk) { c.head = alloc(rt, 4 * nb); c.tail = alloc(rt, 4 * nb); } }
+    if (w * h > cap) { cap = w * h; frame = alloc(rt, 12 * cap); } // grows only
+    const r = cam.r, tr = cam.t;
+    // back faces are hidden by front faces only when the eye is outside the (closed) model's bounding box
+    const e = [-(r[0] * tr[0] + r[3] * tr[1] + r[6] * tr[2]), -(r[1] * tr[0] + r[4] * tr[1] + r[7] * tr[2]), -(r[2] * tr[0] + r[5] * tr[1] + r[8] * tr[2])];
+    const inside = [0, 1, 2].every(k => e[k] >= m.lo[k] && e[k] <= m.hi[k]);
+    const cull = m.closed && !opts.twoSided && !inside;
+    const t0 = performance.now();
+    for (;;) {
+      // a new frame number per attempt: every vertex cache entry is recomputed
+      frameNo = (frameNo + 1) >>> 0 || 1;
+      const dv = new DataView(rt.mem.buffer, pcam, CAM_BYTES);
+      for (let i = 0; i < 9; i++) dv.setFloat64(8 * i, r[i], true);
+      for (let i = 0; i < 3; i++) dv.setFloat64(72 + 8 * i, tr[i], true);
+      dv.setFloat64(96, (h / 2) / cam.tanHalf, true);
+      dv.setUint32(104, w, true); dv.setUint32(108, h, true);
+      dv.setUint32(112, (cull ? 1 : 0) | (opts.edges ? 2 : 0) | (opts.faces !== false ? 4 : 0), true);
+      dv.setUint32(116, frameNo, true); dv.setUint32(120, BH, true); dv.setUint32(124, nb, true);
+      if (await run()) break;
+    }
+    const ms = performance.now() - t0;
+    const n = w * h, buf = rt.mem.buffer;
+    return { w, h, ms, color: new Uint32Array(buf, frame, n), depth: new Float32Array(buf, frame + 4 * n, n), id: new Int32Array(buf, frame + 8 * n, n) };
+  }
+  return { render, threads: nw };
 }

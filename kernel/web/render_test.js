@@ -6,8 +6,12 @@
 //   hole     reference hits a triangle, renderer shows background (crack, lost triangle, wrong clipping)
 //   spill    renderer draws where the reference sees background
 //   occluded renderer shows a different, farther or nearer surface (depth order or culling error)
-// Plus: determinism (same frame twice gives identical buffers), timing per model and resolution, degenerate sizes.
-import { prepare, camera, render, NEAR } from './raster.js';
+// Plus: determinism (same frame twice, and 1 vs 4 workers, give identical buffers), timing per model and resolution
+// against the budget, degenerate sizes.
+import { prepare, camera, createRenderer, NEAR } from './raster.js';
+
+// frame budget at 800x600: 60 fps x 5 (3.3 ms)
+const BUDGET_MS = 1000 / 60 / 5;
 
 const out = document.getElementById('o');
 const lines = [];
@@ -99,8 +103,8 @@ function invDepth(m, cam, w, h, t, px, py) {
 }
 
 // ---------------------------------------------------------------- one view
-function checkView(m, acc, cam, w, h, step) {
-  const fr = render(m, cam, w, h, { edges: false, twoSided: params.has('twosided') });
+async function checkView(R, m, acc, cam, w, h, step) {
+  const fr = await R.render(cam, w, h, { edges: false, twoSided: params.has('twosided') });
   const c = { ok: 0, hole: 0, spill: 0, occluded: 0, outline: 0 };
   const bad = [];
   for (let py = step >> 1; py < h; py += step) for (let px = step >> 1; px < w; px += step) {
@@ -215,36 +219,48 @@ try {
   const perf = [];
   for (const name of list) {
     const m = prepare(await (await fetch('meshes/' + name)).arrayBuffer());
+    const R = await createRenderer(m), R1 = await createRenderer(m, 1); // reorders m's triangles: before the BVH
     const acc = bvh(m);
     const tot = { ok: 0, hole: 0, spill: 0, occluded: 0, outline: 0 };
     const worst = [];
     let views = 0;
     for (const dir of (quick ? dirs.slice(0, 6) : dirs)) for (const dist of dists) for (const pan of (quick ? pans.slice(0, 1) : pans)) {
       const cam = camera(dir, pan, dist);
-      const { c, bad } = checkView(m, acc, cam, 160, 120, 2);
+      const { c, bad } = await checkView(R, m, acc, cam, 160, 120, 2);
       views++;
       for (const k in tot) tot[k] += c[k];
       if (c.hole + c.spill + c.occluded > 0) worst.push({ dir, dist, pan, ...c, bad });
     }
     // determinism and timing at viewer resolutions
     const cam = camera([0.6, -0.5], [0, 0], 2.5);
-    const a = render(m, cam, 640, 480, { edges: true }), ha = hash(a.color) + hash(a.id);
-    const b = render(m, cam, 640, 480, { edges: true }), hb = hash(b.color) + hash(b.id);
-    const time = (w, h) => { const ts = []; let buf = null; for (let i = 0; i < 5; i++) { const t0 = performance.now(); buf = render(m, cam, w, h, { edges: true }, buf); ts.push(performance.now() - t0); } ts.sort((x, y) => x - y); return ts[2]; };
-    const t800 = time(800, 600), t400 = time(400, 300), t1080 = quick ? 0 : time(1920, 1080);
+    const fh = async (r) => { const f = await r.render(cam, 640, 480, { edges: true }); return hash(f.color) + hash(f.id) + hash(f.depth); };
+    const ha = await fh(R), hb = await fh(R), h1 = await fh(R1);
+    // frame time over the 14 directions at the default distance: median and worst
+    const time = async (w, h) => {
+      const ts = [];
+      for (const dir of dirs) {
+        const c = camera(dir, [0, 0], 2.5), rs = [];
+        await R.render(c, w, h, { edges: true });
+        for (let i = 0; i < 5; i++) { const t0 = performance.now(); await R.render(c, w, h, { edges: true }); rs.push(performance.now() - t0); }
+        ts.push(Math.min(...rs));
+      }
+      ts.sort((x, y) => x - y);
+      return [ts[ts.length >> 1], ts[ts.length - 1]];
+    };
+    const [t800, w800] = await time(800, 600), [t400] = await time(400, 300), [t1080] = quick ? [0] : await time(1920, 1080);
     // degenerate sizes must not throw
-    for (const [w, h] of [[1, 1], [7, 5], [3, 200]]) render(m, cam, w, h, {});
+    for (const [w, h] of [[1, 1], [7, 5], [3, 200]]) await R.render(cam, w, h, {});
     const errs = tot.hole + tot.spill + tot.occluded;
     const outlineRate = tot.outline / (tot.ok + errs + tot.outline);
-    // speed budget: an 800x600 frame within 100 ms on the CPU (interactive while dragging at half resolution)
-    const ok = errs === 0 && ha === hb && outlineRate < 1e-4 && t800 <= 100;
+    const det = ha === hb && ha === h1;
+    const ok = errs === 0 && det && outlineRate < 1e-4 && w800 <= BUDGET_MS;
     failures += ok ? 0 : 1;
-    perf.push({ name, nt: m.nt, t800, t400, t1080 });
-    log(`${ok ? 'PASS' : 'FAIL'} ${name.padEnd(24)} ${String(m.nt).padStart(7)} tris ${m.closed ? 'closed' : 'open  '} | ${views} views, ${tot.ok + errs + tot.outline} samples: crack ${tot.hole} spill ${tot.spill} occluded ${tot.occluded} (outline 1px ${tot.outline}) | deterministic ${ha === hb} | 800x600 ${t800.toFixed(1)} ms, 400x300 ${t400.toFixed(1)} ms${t1080 ? `, 1920x1080 ${t1080.toFixed(1)} ms` : ''}`);
+    perf.push({ name, nt: m.nt, t800: w800, t400, t1080 });
+    log(`${ok ? 'PASS' : 'FAIL'} ${name.padEnd(24)} ${String(m.nt).padStart(7)} tris ${m.closed ? 'closed' : 'open  '} | ${views} views, ${tot.ok + errs + tot.outline} samples: crack ${tot.hole} spill ${tot.spill} occluded ${tot.occluded} (outline 1px ${tot.outline}) | deterministic ${det} (1 vs ${R.threads} threads) | 800x600 ${t800.toFixed(2)} ms (worst ${w800.toFixed(2)}), 400x300 ${t400.toFixed(2)} ms${t1080 ? `, 1920x1080 ${t1080.toFixed(2)} ms` : ''}`);
     for (const wv of worst.slice(0, 3)) log(`     view dir ${wv.dir.map(x => x.toFixed(2))} dist ${wv.dist} pan ${wv.pan}: hole ${wv.hole} spill ${wv.spill} occluded ${wv.occluded} e.g. ${JSON.stringify(wv.bad)}`);
   }
   const worstT = perf.reduce((a, b) => (b.t800 > a.t800 ? b : a), perf[0]);
-  log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILED'} | slowest 800x600: ${worstT.name} ${worstT.t800.toFixed(1)} ms (${(worstT.nt / worstT.t800 / 1000).toFixed(2)} M tris/s)`);
+  log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILED'} | slowest 800x600 view: ${worstT.name} ${worstT.t800.toFixed(2)} ms (budget ${BUDGET_MS.toFixed(2)} ms) (${(worstT.nt / worstT.t800 / 1000).toFixed(2)} M tris/s)`);
 } catch (e) { log('ERROR ' + e + '\n' + (e.stack || '')); }
 log('DONE');
 fetch('/result', { method: 'POST', body: lines.join('\n') }).catch(() => {});

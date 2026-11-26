@@ -2,6 +2,8 @@
 //! identical code. Every function uses only IEEE add/sub/mul/div and own implementations of sin and sqrt.
 #![no_std]
 
+pub mod raster;
+
 pub const SUM_N: usize = 4_000_000;
 pub const SUM_CH: usize = 65_536;
 pub const NT: usize = 4000;

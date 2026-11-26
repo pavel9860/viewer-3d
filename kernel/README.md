@@ -7,7 +7,9 @@ brep/         kernel core: geom (Surf trait, analytic surfaces), nurbs (B-spline
               step (STEP -> Body import), check (topology + geometry validator), ssi, exact (predicates), trim (faces in UV),
               make (primitives), mesh (UV triangulation, volume), classify (point in body), boolean (union/intersection/difference on Body);
               `brep check|bool FILE|LIST`
-kcore/        no_std shared math (PRNG, hash, own sin/sqrt, synthetic + real mesh workloads); native and wasm32
+kcore/        no_std shared math (PRNG, hash, own sin/sqrt, synthetic + real mesh workloads); native and wasm32;
+              raster (exact CPU rasterizer: 1/16-px coverage, sort-middle over threads, cluster culling; tests/raster.rs,
+              examples/raster_bench.rs FILE.mesh: native per-phase timing)
 spike/src/
   ssi_cases.rs  hand-made hard cases + randomized analytic stress test
   pred.rs       exact predicate benchmark
@@ -17,8 +19,9 @@ spike/src/
   bench.rs      determinism, transfer, incremental recompute, hashing, naming, assembly instancing
   real.rs       real CATIA mesh workloads (per-part processing, hashing, assembly picking)
 wasm/         kcore exports for the browser (nightly, real atomics: wasm/build.sh)
-web/          mesh.html (viewer: WebGL, else raster.js CPU renderer), render_test.html (renderer vs exact ray casting over
-              14 directions x 7 distances x 2 pans per model: cracks, spills, occlusion, outline, determinism, speed),
+web/          mesh.html (viewer: WebGL, else the CPU renderer: raster.js driving kcore::raster in k.wasm on 4 threads),
+              render_test.html (renderer vs exact ray casting over 14 directions x 7 distances x 2 pans per model: cracks,
+              spills, occlusion, outline, determinism incl. 1 vs 4 threads, 800x600 budget 3.3 ms), bench.html (frame times),
               index.html (WASM tests), serve.py (COOP/COEP, POST /result)
 tools/        export_parts.py (CATIA -> PLY via cadcli)
 ```
@@ -37,6 +40,7 @@ cargo test --release -j4
 python3 -I tools/export_parts.py samples/catia DATA ../cadcore/build/cadcli "ASSEMBLY.CATProduct"
 ./target/release/spike real DATA                   # real data; writes DATA/parts.bin/.idx for the web page
 wasm/build.sh && cp DATA/parts.* web/              # then serve web/ (python3 -I web/serve.py) and open it
+./target/release/brep mesh spike/catia_steps.tsv --out web/meshes   # meshes for mesh.html / render_test.html / bench.html (needs k.wasm)
 ```
 
 Status (2026-11-25): booleans (A-B, A^B, AuB of each file's largest shell with a cylinder) pass on all 15 CATIA STEP files: 0 checker violations, no dangling cuts, volume identities <= 1.5e-5, 25 ms - 2.6 s per operation, 39 s for all; brep import + check of 15 CATIA STEP files (83k edges, 13.9k faces): 0 violations; SSI 7/7, stress 600/600, booleans 7/7 (closed shells, volume error <= 1.6e-5), STEP edges
