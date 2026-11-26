@@ -102,5 +102,27 @@ p = d[3] | profile          p(u, v) = C(u) + v d
   vertex parameters that come through an edge-curve table map (map 5) and are off; that is open in
   cadcore, not in the surface. Emitted only with `--pending`.
 
+## P-curve kind 5: expression (CGM class 155)
+
+```
+p = t0 t1 a b | node(u) | node(v)
+node = code nvals vals[nvals] nkids node[nkids]
+```
+
+(u, v)(t) are the two expressions. Leaves read the curve parameter t:
+
+| code | vals | kids | value |
+|---|---|---|---|
+| 1 | 3 | 0 | v0 + v1 t + v2 t^2 |
+| 2 | 4 | 0 | v3 + v0 cos(v1 - v2 t) |
+| 3 | 0 | 2 | k0 / k1 |
+| 4 | 3 | n | v0 k0 + v1 k1 + v2 (n = 2 in the corpus) |
+| 7 | 5 | 0 | v4 + v0 atan(v1 cos(v2 t + v3)) |
+
+- t0 t1 is the curve's range (coedge ranges lie in it). a b are kept as stored (not used).
+- Evidence: on all 35 parts that have them, the 816 checkable coedges on these curves meet their
+  neighbours within 9.5e-6 of the part size; sphere curves match the projected neighbour edges;
+  stored-mesh vertices lie on them (cadcore FINDINGS.md). Emitted only with `--pending`.
+
 ## Still open (not emitted)
 

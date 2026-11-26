@@ -86,6 +86,9 @@ enum PCurveKind : std::uint32_t {
     PcLine = 1,     // o[2] d[2]                  (u, v) = o + t d
     PcCircle = 2,   // c[2] r s                   (u, v) = c + r (cos a, sin a), a = t / (r s)
     PcHermite = 3,  // n | knots[n] | P[2][n] | D1[2][n] | has2 | D2[2][n]   C2 quintic (cubic if !has2)
+    PcExpr = 5,     // t0 t1 a b | tree(u) | tree(v); a node: code nvals vals[nvals] nkids kids...;
+                    //   leaves take the curve parameter t (cgm_model.cpp expr()); CGM class 155, emitted
+                    //   only with DecodeOptions::pending_kinds
     PcBSpline = 4,  // degree nk | knots[nk] (expanded) | np rational | poles[np][2] | weights[np if rational]
                     //   (u, v) = sum N_i,degree(t) P_i; t is in the knot range (CGM class 170; emitted
                     //   only with DecodeOptions::pending_kinds until the kernel evaluates it)

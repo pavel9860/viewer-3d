@@ -159,6 +159,33 @@ private:
         if (!opt_.pending_kinds) throw DecodeError(ErrorCode::Unsupported, "class " + std::to_string(o.type) + " (" + what + ") awaits kernel support", o.at);
     }
 
+    // One item of a 155 expression (varint form: i16 code, [i16 inputs, i16 0 for codes 1 and 4], f64
+    // values, child items) -> code nvals vals nkids kids (cgm_model.hpp PcExpr).
+    static void expr(Rd& r, std::vector<double>& p, int depth) {
+        if (depth > 32) bad("expression too deep", r.at + r.k);
+        const int code = r.i16();
+        int vals = 0, kids = 0;
+        switch (code) {
+            case 1: case 4: {
+                const int n = r.i16();
+                r.i16();
+                if (n < 1 || n > 8) bad("expression input count", r.at + r.k);
+                vals = 3;
+                kids = code == 4 ? n : 0;
+                break;
+            }
+            case 2: vals = 4; break;
+            case 3: kids = 2; break;
+            case 7: vals = 5; break;
+            default: throw DecodeError(ErrorCode::Unsupported, "expression item code " + std::to_string(code), r.at + r.k);
+        }
+        p.push_back(code);
+        p.push_back(vals);
+        for (int i = 0; i < vals; ++i) p.push_back(r.f64());
+        p.push_back(kids);
+        for (int i = 0; i < kids; ++i) expr(r, p, depth + 1);
+    }
+
     // A revolution's profile (cgm_model.hpp SurfRevolution): edge curves stand for their first curve.
     void profile(std::uint32_t c, std::vector<double>& p) {
         for (int depth = 0; is_edge_curve(obj(c).type); ++depth) {
@@ -372,6 +399,15 @@ private:
                 const bool has2 = r.i16() != 0;
                 pc.p.push_back(has2 ? 1.0 : 0.0);
                 if (has2) for (std::size_t i = 0; i < 2 * n; ++i) pc.p.push_back(r.f64());
+                break;
+            }
+            case 155: {
+                pending(o, "expression p-curve");
+                pc.kind = PcExpr;
+                for (int i = 0; i < 4; ++i) pc.p.push_back(r.f64());
+                expr(r, pc.p, 0);
+                expr(r, pc.p, 0);
+                if (r.left() != 0) bad("expression p-curve payload length", o.at);
                 break;
             }
             case 170: {

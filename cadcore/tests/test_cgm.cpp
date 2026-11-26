@@ -1,6 +1,7 @@
 // CATIA CGMGeom: varint integers, framing and B-rep decode of corpus parts (skipped when the
 // samples folder is absent). Ground truth for the meshes is CATIA's stored tessellation
 // (research/cgm/compare_tess.py); these cases pin the decoded structure.
+#include <functional>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -185,6 +186,52 @@ TEST_CASE("CGM pending surface kinds: fillets (216) and revolutions (211)") {
             }
         }
         CHECK(n == pt.surfaces);
+    }
+}
+
+TEST_CASE("CGM pending p-curve kind: expressions (155)") {
+    // one part per form: varint (cosine items, quotients), 2011Spring raw integers (polynomial and
+    // arctangent items), 2015Fall compact integers
+    const fs::path base = fs::path(CADCORE_SAMPLES_DIR);
+    const struct { const char* path; std::size_t faces; } parts[] = {
+        {"caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Jack_Frame.CATPart", 216},
+        {"local/703cd616", 3872},
+        {"local/b33cd8bf", 328},
+    };
+    for (const auto& pt : parts) {
+        const fs::path p = base / pt.path;
+        if (!fs::exists(p)) continue;
+        const auto file = load(p);
+        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+        REQUIRE(st.has_value());
+        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
+        const cgm::Ir plain = cgm::decode(fr);
+        CHECK(plain.faces.size() < pt.faces);
+        cgm::DecodeOptions opt;
+        opt.pending_kinds = true;
+        const cgm::Ir ir = cgm::decode(fr, {}, opt);
+        CHECK(ir.faces.size() == pt.faces);
+        CHECK(ir.skipped.empty());
+        std::size_t n = 0;
+        for (const auto& c : ir.pcurves) {
+            if (c.kind != cgm::PcExpr) continue;
+            ++n;
+            // two trees after the 4 head values; each node: code nvals vals nkids kids
+            std::size_t k = 4;
+            std::function<void()> node = [&] {
+                REQUIRE(k + 2 <= c.p.size());
+                const int code = int(c.p[k]);
+                CHECK((code == 1 || code == 2 || code == 3 || code == 4 || code == 7));
+                k += 2 + std::size_t(c.p[k + 1]);
+                REQUIRE(k < c.p.size());
+                const int kids = int(c.p[k++]);
+                for (int i = 0; i < kids; ++i) node();
+            };
+            node();
+            node();
+            CHECK(k == c.p.size());
+        }
+        CHECK(n > 0);
     }
 }
 

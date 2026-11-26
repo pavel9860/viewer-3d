@@ -237,8 +237,24 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   `--pending` 485,920 -> 488,806, 1,088 -> 1,109 complete; no part loses faces. On the parts that
   gained default faces, coedges meet within 1e-4 everywhere except 2 project F part-5f03 edges, as at
   HEAD.
-- Still open: 155 (composite p-curve: a coded list of operations, opcodes 1, 2, 3, 7, 0x141),
-  152 / code 26 (ellipse-like p-curve: c[2], angle, a, b, ..., t0 t1 s), codes 60 / 61 (surfaces
+- 155 = expression p-curve: refs (surface), f64 t0 t1 a b, then the u and v expressions as item trees
+  in prefix order, functions of the curve parameter t. Varint item: i16 code, [codes 1 and 4: i16
+  inputs, i16 0], f64 values, child items; compact: u8 0x41, int code, [codes 1 and 4: varint input
+  count], values, children. Codes: 1 = v0 + v1 t + v2 t^2 (v2 = 0 in all 850); 2 = v3 + v0 cos(v1 -
+  v2 t); 3 = child0 / child1; 4 = v0 child0 + v1 child1 + v2 (v2 = 0 in all 28); 7 = v4 + v0
+  atan(v1 cos(v2 t + v3)). Curves of a plane or cone section (cosine ratios), on cylinders (u = t)
+  and on spheres (latitude by arctangent). All 884 records of the corpus consume exactly (688
+  2011Spring, 92 2012+, 104 varint).
+- Evidence: code 7 puts the projected neighbour edges on spheres exactly (ExternalFoam, ground
+  truth = the decoded neighbour lines). Code 4's operand order puts 214 stored-mesh vertices on the
+  curves against 115 for the other order (project C part-24d4). The sign of code 2 and the quotient of
+  code 3 follow from pairs of 155 curves on one edge (plane vs cylinder, plane vs cone): with them all
+  16 Jack_Frame and 8 Kinematics edges meet within 3e-16, the other readings miss every one. On all
+  35 parts, the 816 checkable edges on 155 curves meet their neighbours within 9.5e-6. Varint parts
+  have no stored tessellation, so codes 2 and 3 rest on that consistency only.
+- Results (155 as IR p-curve kind 5, `--pending`): 488,806 -> 489,893 faces, 1,109 -> 1,141
+  complete parts; default unchanged; no part loses faces.
+- Still open: 152 / code 26 (ellipse-like p-curve: c[2], angle, a, b, ..., t0 t1 s), codes 60 / 61 (surfaces
   without old twins), 15 (a 3D curve used as revolution profile).
 - Results (B-splines): default mode 477,290 -> 477,491 faces, with no part losing any. The +201 faces in 8 parts
   have vertex parameters taken from B-spline knot ranges; their edges meet within 5.5e-7. With

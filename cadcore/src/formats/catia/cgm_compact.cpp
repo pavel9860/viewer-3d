@@ -95,6 +95,34 @@ void sections(In& in, Out& o, int m) {
     o.raw(in.raw(in.left()));
 }
 
+// 155 expression p-curve item (cgm_model.hpp PcExpr): u8 0x41, int code; codes 1 and 4: varint input
+// count; f64 values (1: 3, 2: 4, 3: 0, 4: 3, 7: 5); then the child items (3: 2, 4: one per input).
+// Written in the varint dialect's form: i16 code, [i16 inputs, i16 0], values, children.
+void expr_item(In& in, Out& o, int depth) {
+    if (depth > 32) bad("expression too deep", in.at);
+    if (in.u8() != 0x41) bad("expression item header", in.at);
+    const int code = in.i16();
+    o.i16(code);
+    int kids = 0, vals = 0;
+    switch (code) {
+        case 1: case 4: {
+            const std::uint32_t n = in.count();
+            if (n == 0 || n > 8) bad("expression input count", in.at);
+            o.i16(std::int32_t(n));
+            o.i16(0);
+            vals = 3;
+            kids = code == 4 ? int(n) : 0;
+            break;
+        }
+        case 2: vals = 4; break;
+        case 3: kids = 2; break;
+        case 7: vals = 5; break;
+        default: throw DecodeError(ErrorCode::Unsupported, "expression item code " + std::to_string(code) + " not decoded", in.at);
+    }
+    for (int i = 0; i < vals; ++i) o.f64(in.f64());
+    for (int i = 0; i < kids; ++i) expr_item(in, o, depth + 1);
+}
+
 // 211 revolution: o X Y Z (12 f64), box (4 f64), int, int, k, 3 f64, int, f64 (cgm_model.hpp).
 void revolution(In& in, Out& o) {
     for (int i = 0; i < 16; ++i) o.f64(in.f64());
@@ -566,7 +594,14 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
             break;
         // the decoder uses the references and the leading doubles of these (cgm_model.hpp)
         case 211: c.refs = in.refs(1); revolution(in, o); break;
-        case 12: case 155: case 210: case 212: c.refs = in.refs(1); o.raw(in.raw(in.left())); break;
+        case 155: {
+            c.refs = in.refs(1);
+            for (int i = 0; i < 4; ++i) o.f64(in.f64());
+            expr_item(in, o, 0);
+            expr_item(in, o, 0);
+            break;
+        }
+        case 12: case 210: case 212: c.refs = in.refs(1); o.raw(in.raw(in.left())); break;
         case 214: c.refs = in.refs(2); o.raw(in.raw(in.left())); break;
         case 241: case 242: case 244: case 251: c.refs = in.refs(); o.raw(in.raw(in.left())); break;
         default:

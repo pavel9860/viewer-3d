@@ -37,6 +37,8 @@
 //                   then a byte 0)
 //   130 B-spline    (code 22, no refs) knot vector, int rational, poles[np][3], [weights], tail as 170
 //   curve
+//   155 expression  ref, f64 t0 t1 a b, items u v: u8 0x41, int code, [1, 4: varint inputs], f64
+//   p-curve         values (1: 3, 2: 4, 3: 0, 4: 3, 7: 5), child items (3: 2, 4: one per input)
 //   170 B-spline    ref, i16 0, knot vector, poles[np][2] (f64), int a, int b, f64 0 L 1 0, u8 c, [c != 0:
 //   p-curve         further fields, not decoded], int -2
 //   231 NURBS       knot vectors u v, int rational, poles (v fastest), [weights], a 152- or 154-byte
