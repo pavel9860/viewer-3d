@@ -75,6 +75,20 @@ p = degree nk | knots[nk] | np rational | poles[np][2] | weights[np if rational]
   edge excepted, an open line-parameter case in cadcore; FINDINGS.md).
 - Emitted only with `--pending`, like kinds 9 and 10.
 
+## 11: ruled two-curve surface (CGM class 243, and 251 through its 243)
+
+```
+p = n | knots[n] | P[n][6] | D1[n][6] | D2[n][6] | u0 u1 v0 v1
+(A, B)(u): the 6 values (A[3] B[3]) by the C2 quintic Hermite of P, D1, D2 over the knots (as kind 10)
+p(u, v) = A(u) + v (B(u) - A(u))
+```
+
+- The face p-curves use these (u, v) directly. v often runs past [0, 1] (boxes [-1, 2], [-2, 2],
+  [-4.5, 1]), so the surface extends linearly.
+- Evidence: stored-mesh vertices lie on these surfaces (6 parts, ground truth = CATIA's stored
+  tessellation); p-curve line ends land on stored vertices within 2e-8; coedges meet their
+  neighbours within 1.1e-7 (4 parts, all three stored forms).
+- Emitted only with `--pending`.
+
 ## Still open (not emitted)
 
-- 251 (refs: a 243 surface and a p-curve) and 243 (about 850 bytes): not decoded.

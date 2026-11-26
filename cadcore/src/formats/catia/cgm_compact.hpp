@@ -41,7 +41,8 @@
 //   200 plane       o, u8 m (bits 0-5: U V component is zero; 6: scale (1, 1); 7: default box), rest
 //   201 cylinder    o, u8 m (bits 0-5 zero X Y components), r u0 u1 v0 v1, u8 (bits: su = 1, sv = 1,
 //                   reference parameter = u0), the others
-//   10, 100, 202, 203, 204, 216, 243 unchanged; 12, 155, 210, 211, 212: ref + unchanged; 214: two refs +
+//   216, 243       int n, knot vector, sections P D1 D2 [n][10 | 6], box, rest unchanged
+//   10, 100, 202, 203, 204 unchanged; 12, 155, 210, 211, 212: ref + unchanged; 214: two refs +
 //                   unchanged; 241, 242, 244, 251: refs + unchanged (the decoder reads their references
 //                   and leading doubles only)
 //

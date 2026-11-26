@@ -281,6 +281,22 @@ private:
                 vec(30 * n + 4);
                 break;
             }
+            case 243: case 251: {
+                // 251 takes the surface of its 243 (refs[0]) with the same parameters; its other
+                // reference is a guide p-curve (not needed for the shape)
+                pending(o, "ruled section surface");
+                const Obj& g = o.type == 251 ? obj(first(o)) : o;
+                if (g.type != 243) bad("ruled surface without its two-curve section record", o.at);
+                Rd q = rd(g);
+                sf.kind = SurfRuled;
+                const std::int32_t n = q.i32();
+                const KnotVector kv = knot_vector(q);
+                if (kv.degree != 5 || kv.knots.size() != std::size_t(n)) bad("two-curve section knot vector", g.at);
+                sf.p.push_back(double(n));
+                sf.p.insert(sf.p.end(), kv.knots.begin(), kv.knots.end());
+                for (int i = 0; i < 18 * n + 4; ++i) sf.p.push_back(q.f64());
+                break;
+            }
             case 231: {
                 sf.kind = SurfNurbs;
                 const KnotVector u = knot_vector(r), v = knot_vector(r);

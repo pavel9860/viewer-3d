@@ -188,6 +188,42 @@ TEST_CASE("CGM pending surface kinds: fillets (216) and revolutions (211)") {
     }
 }
 
+TEST_CASE("CGM pending surface kind: ruled two-curve surfaces (243, 251)") {
+    // one part per stored form: 2011Spring raw integers, 2015Fall packed, 2009Fall compact integers
+    const fs::path base = fs::path(CADCORE_SAMPLES_DIR);
+    const struct { const char* path; std::size_t faces, decoded; } parts[] = {
+        {"local/5f11d4d4", 39, 39},
+        {"local/04190b04", 717, 716},
+        {"caa/caadoc/Doc/online/CAAScdStrUseCases/samples/EditCutout/Plate_0053.CATPart", 20, 20},
+    };
+    for (const auto& pt : parts) {
+        const fs::path p = base / pt.path;
+        if (!fs::exists(p)) continue;
+        const auto file = load(p);
+        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+        REQUIRE(st.has_value());
+        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
+        const cgm::Ir plain = cgm::decode(fr);
+        CHECK(plain.faces.size() < pt.decoded);
+        for (const auto& sf : plain.surfaces) CHECK(sf.kind != cgm::SurfRuled);
+        cgm::DecodeOptions opt;
+        opt.pending_kinds = true;
+        const cgm::Ir ir = cgm::decode(fr, {}, opt);
+        CHECK(ir.faces.size() == pt.decoded);
+        CHECK(ir.faces.size() + ir.skipped.size() >= pt.faces);
+        std::size_t n = 0;
+        for (const auto& sf : ir.surfaces) {
+            if (sf.kind != cgm::SurfRuled) continue;
+            ++n;
+            const std::size_t k = std::size_t(sf.p.at(0));
+            REQUIRE(sf.p.size() == 1 + 19 * k + 4);
+            CHECK(sf.p[1] == sf.p[1 + 19 * k]);          // u0: the first knot
+            CHECK(sf.p[2 + 19 * k] > sf.p[1 + 19 * k]);  // u1 > u0
+        }
+        CHECK(n > 0);
+    }
+}
+
 TEST_CASE("CGM pending p-curve kind: B-splines (170, compact code 33)") {
     // one part per stored form: 2011Spring raw integers, 2015Fall packed form byte, 2009Fall compact
     // integers. Emitted only on request; every coedge range lies in its knot range (vertex parameters
@@ -196,7 +232,7 @@ TEST_CASE("CGM pending p-curve kind: B-splines (170, compact code 33)") {
     const struct { const char* path; std::size_t faces, decoded; } parts[] = {
         {"local/d04dc2b9", 299, 299},
         {"local/5838914f", 507, 507},
-        {"github/catia-v5/Guilherme115__Motor-V6/05_Admissao_Escape/Duto.CATPart", 379, 351},
+        {"github/catia-v5/Guilherme115__Motor-V6/05_Admissao_Escape/Duto.CATPart", 379, 379},
     };
     for (const auto& pt : parts) {
         const fs::path p = base / pt.path;

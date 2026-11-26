@@ -206,7 +206,21 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   offset from the range start, unlike the 98k+ absolute cases in the varint dialect (open).
 - 3D check (indicator): on edges with a second, decodable p-curve, the two curves meet within 3.3e-15
   of the part size, except that one wheel part edge.
-- Results: default mode 477,290 -> 477,491 faces, with no part losing any. The +201 faces in 8 parts
+- 243 = two 3D curves A, B as one C2 quintic Hermite of 6 values (A[3] B[3]): the 216 layout with
+  6 values per section (int n, knot vector of degree 5, P D1 D2 [n][6], box u0 u1 v0 v1, 0, ~1).
+  The surface is ruled, p(u, v) = A(u) + v (B(u) - A(u)): it puts about twice as many stored-mesh
+  vertices on the surfaces as reading B as a direction (6 parts, ground truth = CATIA's stored
+  tessellation), and no 243 has zero hits. v boxes run past [0, 1] ([-1, 2], [-2, 2], [-4.5, 1]).
+- 251 = refs (243, guide p-curve), int 1, f64 t0 t1 (the guide's range or the 243's knot range), 0,
+  1, then a few ints and optional end data (point + direction, 6 f64; not decoded). Its faces'
+  p-curves use the 243's own (u, v): p-curve line ends land on stored-mesh vertices within 2e-8 with
+  u taken as is (4 parts), not with u shifted by t0. Compact layouts keep 251's body as written.
+- Results (243 / 251 as IR kind 11, `--pending` only): all 765 243 and 793 251 records of the 40
+  parts that have them transcode; with `--pending` no face is skipped for them. Coedges on them meet
+  their neighbours within 1.1e-7 (4 parts). Default 477,491 -> 477,502 (11 faces in Guntle whose
+  p-curves needed the 251 box); `--pending` 484,640 -> 485,920 faces, complete parts 1,062 -> 1,088.
+  No part loses faces. One Guntle edge (sphere / cone, 2.9e-3) is as at HEAD.
+- Results (B-splines): default mode 477,290 -> 477,491 faces, with no part losing any. The +201 faces in 8 parts
   have vertex parameters taken from B-spline knot ranges; their edges meet within 5.5e-7. With
   `--pending`: 478,815 -> 484,640 faces, and 1,047 -> 1,062 complete parts.
 - With `--pending`: the 108 parts that have 211/216/251 decode 57,211 faces instead of 55,686, and 36 of

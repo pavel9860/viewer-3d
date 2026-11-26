@@ -182,11 +182,11 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
         case 524: o.i16(in.i16()); break;
         case 525: o.i32(in.i32()); o.i16(in.i16()); break;
         // the decoder uses the references and the leading doubles of these (cgm_model.hpp)
-        case 216: {
+        case 216: case 243: {
             const auto [n, b, np] = knot_vector(in, o, true);
             (void)b;
             (void)np;
-            f64s(in, o, 30 * std::size_t(n) + 4);
+            f64s(in, o, (r.type == 216 ? 30 : 18) * std::size_t(n) + 4);
             o.raw(in.raw(in.left()));
             break;
         }
@@ -198,7 +198,7 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
             f64s(in, o, 1);
             break;
         case 10: case 12: case 100: case 155: case 200: case 201: case 202: case 203: case 204: case 210:
-        case 212: case 214: case 241: case 242: case 243: case 244: case 251: case 500: case 502:
+        case 212: case 214: case 241: case 242: case 244: case 251: case 500: case 502:
             o.raw(in.raw(in.left()));
             break;
         default:

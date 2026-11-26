@@ -81,15 +81,16 @@ std::size_t knot_vector(In& in, Out& o, int& n_out) {
     return sum - std::size_t(deg) - 1;
 }
 
-// 216 fillet: int n, knot vector (n knots, degree 5), sections P[n][10] D1[n][10] D2[n][10] (f64), then a
-// tail whose first four f64 are the parameter box u0 u1 v0 v1 (the rest is kept as written; not decoded).
-void fillet(In& in, Out& o) {
+// Section curves, 216 fillet (m = 10) and 243 two-curve sections (m = 6): int n, knot vector (n knots,
+// degree 5), sections P[n][m] D1[n][m] D2[n][m] (f64), then a tail whose first four f64 are the parameter
+// box u0 u1 v0 v1 (the rest is kept as written; not decoded).
+void sections(In& in, Out& o, int m) {
     const int n = in.i32();
     o.i32(n);
     int nk = 0;
     knot_vector(in, o, nk);
-    if (nk != n) bad("fillet section count differs from its knots", in.at);
-    for (int i = 0; i < 30 * n; ++i) o.f64(in.f64());
+    if (nk != n) bad("section count differs from its knots", in.at);
+    for (int i = 0; i < 3 * m * n; ++i) o.f64(in.f64());
     for (int i = 0; i < 4; ++i) o.f64(in.f64());
     o.raw(in.raw(in.left()));
 }
@@ -524,8 +525,16 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
             if (cx) cx->box[r.id] = {v[1], v[2], v[3], v[4]};
             break;
         }
-        case 216: fillet(in, o); break;
-        case 10: case 100: case 202: case 203: case 204: case 243:
+        case 216: sections(in, o, 10); break;
+        case 243:
+            sections(in, o, 6);
+            if (cx) {  // box: the four f64 after the sections
+                const std::size_t n = load_u32(o.p.data(), false);
+                const std::size_t box = 4 + 20 + 12 * n + 8 * 18 * n;
+                cx->box[r.id] = {load_f64_le(o.p.data() + box), load_f64_le(o.p.data() + box + 8), load_f64_le(o.p.data() + box + 16), load_f64_le(o.p.data() + box + 24)};
+            }
+            break;
+        case 10: case 100: case 202: case 203: case 204:
             o.raw(in.raw(in.left()));
             if (cx) {
                 auto at = [&](int i) { return load_f64_le(o.p.data() + 8 * i); };
@@ -593,14 +602,14 @@ std::vector<CanonicalRecord> canonical_records(const Stream& s, const CompactLay
                 out[i].error = "class " + std::to_string(r.type) + " record " + std::to_string(r.id) + ": " + e.what();
             }
         }
-        // carriers (212, 241, 242, 244) use their first reference's parameters, offsets (214) their
+        // carriers (212, 241, 242, 244) and 251 use their first reference's parameters, offsets (214) their
         // base's (refs[1])
         for (bool more = p == 0; more;) {
             more = false;
             for (std::size_t i = 0; i < s.records.size(); ++i) {
                 const std::uint16_t t = s.records[i].type;
                 const std::size_t j = t == 214 ? 1 : 0;
-                if ((t != 212 && t != 214 && t != 241 && t != 242 && t != 244) || !out[i].error.empty() || out[i].c.refs.size() <= j || cx.box.count(s.records[i].id)) continue;
+                if ((t != 212 && t != 214 && t != 241 && t != 242 && t != 244 && t != 251) || !out[i].error.empty() || out[i].c.refs.size() <= j || cx.box.count(s.records[i].id)) continue;
                 if (auto it = cx.box.find(out[i].c.refs[j]); it != cx.box.end()) { cx.box[s.records[i].id] = it->second; more = true; }
             }
         }
