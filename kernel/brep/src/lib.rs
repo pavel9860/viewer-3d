@@ -10,6 +10,7 @@ pub mod make;
 pub mod mesh;
 pub mod nurbs;
 pub mod p21;
+pub mod simplify;
 pub mod par;
 pub mod ssi;
 pub mod step;

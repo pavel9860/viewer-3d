@@ -138,23 +138,41 @@ fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
         }
     }
     let t = ms(t0);
-    if let Some(dir) = out { write_mesh(dir, f.rsplit('/').next().unwrap(), &all, im.diag); }
+    let mut lods = String::new();
+    if let Some(dir) = out {
+        // detail levels for the viewer: tolerances from a quarter of the chord, doubling; errors add the chord
+        let t1 = Instant::now();
+        let tols: Vec<f64> = (0..10).map(|k| 0.25 * chord * (1u64 << k) as f64).collect();
+        let mut lv = brep::simplify::levels(&all.pos, &all.tri, &all.face, &tols, WORKERS);
+        for l in &mut lv { l.err += chord; }
+        lods = format!(" | levels {} in {:.0} ms", lv.iter().map(|l| format!("{}@{:.1e}", l.tri.len(), l.err)).collect::<Vec<_>>().join(" "), ms(t1));
+        write_mesh(dir, f.rsplit('/').next().unwrap(), &all, chord, &lv, im.diag);
+    }
     let bad = open + empty + coarse;
-    println!("{:<26} {} faces -> {tris} triangles in {t:.0} ms | open edges {open} non-manifold {nonman} | empty faces {empty} coarse {coarse} | max dev {:.1e} mm | volume mesh/exact {:.6} (worst shell rel {vrel:.1e}){}",
+    println!("{:<26} {} faces -> {tris} triangles in {t:.0} ms | open edges {open} non-manifold {nonman} | empty faces {empty} coarse {coarse} | max dev {:.1e} mm | volume mesh/exact {:.6} (worst shell rel {vrel:.1e}){lods}{}",
         f.rsplit('/').next().unwrap(), b.faces.len(), dev * im.diag, mv / ev, if bad > 0 { " FAIL" } else { "" });
     bad
 }
 
 /// little-endian: u32 vertex count, u32 triangle count, f32 xyz per vertex (model units), u32 x3 per triangle,
-/// u32 face id per triangle; DIR/index.json lists the files
-fn write_mesh(dir: &str, name: &str, m: &brep::tess::Mesh, scale: f64) {
+/// u32 face id per triangle; then the detail levels: "LODS", f32 error of the mesh above, u32 level count, and per
+/// level f32 error, then the same block as the mesh (counts, positions, triangles, face ids). Errors are relative to
+/// the model diagonal. DIR/index.json lists the files.
+fn write_mesh(dir: &str, name: &str, m: &brep::tess::Mesh, err: f64, lv: &[brep::simplify::Level], scale: f64) {
     std::fs::create_dir_all(dir).unwrap();
     let mut b: Vec<u8> = vec![];
-    b.extend((m.pos.len() as u32).to_le_bytes());
-    b.extend((m.tri.len() as u32).to_le_bytes());
-    for p in &m.pos { for k in 0..3 { b.extend(((p[k] * scale) as f32).to_le_bytes()); } }
-    for t in &m.tri { for k in 0..3 { b.extend(t[k].to_le_bytes()); } }
-    for f in &m.face { b.extend(f.to_le_bytes()); }
+    let block = |b: &mut Vec<u8>, pos: &[[f64; 3]], tri: &[[u32; 3]], face: &[u32]| {
+        b.extend((pos.len() as u32).to_le_bytes());
+        b.extend((tri.len() as u32).to_le_bytes());
+        for p in pos { for k in 0..3 { b.extend(((p[k] * scale) as f32).to_le_bytes()); } }
+        for t in tri { for k in 0..3 { b.extend(t[k].to_le_bytes()); } }
+        for f in face { b.extend(f.to_le_bytes()); }
+    };
+    block(&mut b, &m.pos, &m.tri, &m.face);
+    b.extend(b"LODS");
+    b.extend((err as f32).to_le_bytes());
+    b.extend((lv.len() as u32).to_le_bytes());
+    for l in lv { b.extend((l.err as f32).to_le_bytes()); block(&mut b, &l.pos, &l.tri, &l.tag); }
     let file = format!("{}.mesh", name.trim_end_matches(".stp"));
     std::fs::write(format!("{dir}/{file}"), b).unwrap();
     let idx = format!("{dir}/index.json");
