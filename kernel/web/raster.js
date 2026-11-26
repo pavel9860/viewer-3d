@@ -6,14 +6,41 @@
 // range in triangle order. The frame is bit-identical for any number of workers; without cross-origin isolation it
 // runs on the calling thread.
 
-/** parse a `brep mesh --out` file: u32 nv, u32 nt, f32 xyz*nv, u32 3*nt, u32 face*nt; normalized to the unit sphere */
+/**
+ * parse a `brep mesh --out` file: u32 nv, u32 nt, f32 xyz*nv, u32 3*nt, u32 face*nt, normalized to the unit sphere;
+ * then optional detail levels ("LODS", f32 chord of the mesh, u32 count, per level f32 error and the same block).
+ * Returns the mesh with `chord` (its deviation from the exact model, normalized units) and `levels`: the mesh itself
+ * (err 0), then each coarser level with `err`, its largest deviation from the mesh; all in the same frame.
+ */
 export function prepare(buffer) {
   const dv = new DataView(buffer);
-  const nv = dv.getUint32(0, true), nt = dv.getUint32(4, true);
-  const P = new Float32Array(buffer, 8, nv * 3), T = new Uint32Array(buffer.slice(8 + nv * 12, 8 + nv * 12 + nt * 12)), F = new Uint32Array(buffer.slice(8 + nv * 12 + nt * 12, 8 + nv * 12 + nt * 16));
+  const block = off => {
+    const nv = dv.getUint32(off, true), nt = dv.getUint32(off + 4, true), p = off + 8;
+    return { nv, nt, P: new Float32Array(buffer.slice(p, p + nv * 12)), T: new Uint32Array(buffer.slice(p + nv * 12, p + nv * 12 + nt * 12)), F: new Uint32Array(buffer.slice(p + nv * 12 + nt * 12, p + nv * 12 + nt * 16)), end: p + nv * 12 + nt * 16 };
+  };
+  const b0 = block(0);
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < nv; i++) for (let k = 0; k < 3; k++) { const x = P[3 * i + k]; if (x < lo[k]) lo[k] = x; if (x > hi[k]) hi[k] = x; }
+  for (let i = 0; i < b0.nv; i++) for (let k = 0; k < 3; k++) { const x = b0.P[3 * i + k]; if (x < lo[k]) lo[k] = x; if (x > hi[k]) hi[k] = x; }
   const c = [0, 1, 2].map(k => (lo[k] + hi[k]) / 2), s = 2 / (Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1);
+  const m = build(b0, c, s);
+  m.err = 0; m.levels = [m];
+  let off = b0.end;
+  if (off + 12 <= buffer.byteLength && String.fromCharCode(...new Uint8Array(buffer, off, 4)) === 'LODS') {
+    m.chord = dv.getFloat32(off + 4, true) * s;
+    const n = dv.getUint32(off + 8, true);
+    off += 12;
+    for (let i = 0; i < n; i++) {
+      const err = dv.getFloat32(off, true) * s, b = block(off + 4);
+      const l = build(b, c, s);
+      l.err = err; l.levels = null;
+      m.levels.push(l);
+      off = b.end;
+    }
+  }
+  return m;
+}
+
+function build({ nv, nt, P, T, F }, c, s) {
   const V = new Float64Array(nv * 3);
   for (let i = 0; i < nv; i++) for (let k = 0; k < 3; k++) V[3 * i + k] = (P[3 * i + k] - c[k]) * s;
   // world normals and face colours per triangle
@@ -34,6 +61,20 @@ export function prepare(buffer) {
   const blo = [Infinity, Infinity, Infinity], bhi = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < nv; i++) for (let k = 0; k < 3; k++) { blo[k] = Math.min(blo[k], V[3 * i + k]); bhi[k] = Math.max(bhi[k], V[3 * i + k]); }
   return { nv, nt, V, T, F, N, C, closed: half.size === 0, lo: blo, hi: bhi };
+}
+
+/**
+ * the detail level to draw: the coarsest whose deviation from the full mesh, projected at the nearest point of the
+ * model's bounding sphere, stays within `px` pixels (the full mesh when the eye is inside the sphere)
+ */
+export function pickLevel(m, cam, h, px = 1) {
+  const f = (h / 2) / cam.tanHalf, t = cam.t;
+  // the model centre (origin) is at t in camera space; the sphere through the bounding box's farthest corner
+  const near = Math.hypot(t[0], t[1], t[2]) - Math.hypot(...[0, 1, 2].map(k => Math.max(Math.abs(m.lo[k]), Math.abs(m.hi[k]))));
+  if (!(near > NEAR)) return 0;
+  let k = 0;
+  for (let i = 1; i < m.levels.length; i++) if (m.levels[i].err * f / near <= px) k = i;
+  return k;
 }
 
 export function hue(i) {
@@ -205,4 +246,22 @@ export async function createRenderer(m, nthreads = 4) {
     return { w, h, ms, color: new Uint32Array(buf, frame, n), depth: new Float32Array(buf, frame + 4 * n, n), id: new Int32Array(buf, frame + 8 * n, n) };
   }
   return { render, threads: nw };
+}
+
+/**
+ * a renderer over a mesh's detail levels: each frame draws the level `pickLevel` chooses (renderers per level are
+ * made on first use); the frame reports the level drawn
+ */
+export async function createLodRenderer(m, nthreads = 4, px = 1) {
+  const rs = new Map();
+  const get = async k => { if (!rs.has(k)) rs.set(k, await createRenderer(m.levels[k], nthreads)); return rs.get(k); };
+  const r0 = await get(0);
+  return {
+    threads: r0.threads,
+    async render(cam, w, h, opts = {}) {
+      const k = opts.level ?? pickLevel(m, cam, h, opts.px ?? px);
+      const fr = await (await get(k)).render(cam, w, h, opts);
+      return { ...fr, level: k, nt: m.levels[k].nt };
+    },
+  };
 }

@@ -16,7 +16,7 @@
   <div id="info">drag: rotate · shift+drag / right-drag: pan · wheel: zoom</div>
 </div>
 <script type="module">
-import { prepare, camera, createRenderer } from './raster.js';
+import { prepare, camera, createLodRenderer } from './raster.js';
 // Minimal WebGL viewer for `brep mesh --out web/meshes` files (u32 nv, u32 nt, f32 xyz*nv, u32 3*nt, u32 face*nt).
 // Flat shading per triangle, one colour per B-rep face, optional triangle edges.
 const cv = document.getElementById('c');
@@ -43,9 +43,9 @@ function hue(i) { const h = (i * 0.61803398875) % 1, s = 0.45, v = 0.9; const k 
 async function load(name) {
   const b = await (await fetch('meshes/' + name)).arrayBuffer(), dv = new DataView(b);
   if (!gl) {
-    const m = prepare(b), r = await createRenderer(m);
+    const m = prepare(b), r = await createLodRenderer(m);
     soft = r; mesh = {};
-    infoText = `${name}: ${m.nv} vertices, ${m.nt} triangles, ${new Set(m.F).size} faces · ${glName}, ${r.threads} threads`;
+    infoText = `${name}: ${m.nv} vertices, ${m.nt} triangles, ${new Set(m.F).size} faces, ${m.levels.length - 1} detail levels · ${glName}, ${r.threads} threads`;
     draw();
     return;
   }
@@ -88,7 +88,7 @@ async function draw2d() {
     if (!img || img.width !== w || img.height !== h) img = new ImageData(w, h);
     img.data.set(new Uint8Array(fr.color.buffer, fr.color.byteOffset, 4 * w * h)); // shared memory: copied out
     ctx2.putImageData(img, 0, 0);
-    info.textContent = `${infoText} · ${w}x${h} in ${fr.ms.toFixed(1)} ms`;
+    info.textContent = `${infoText} · level ${fr.level} (${fr.nt} triangles) ${w}x${h} in ${fr.ms.toFixed(1)} ms`;
   } while (again);
   busy = false;
 }

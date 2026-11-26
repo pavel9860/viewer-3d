@@ -19,9 +19,10 @@ spike/src/
   bench.rs      determinism, transfer, incremental recompute, hashing, naming, assembly instancing
   real.rs       real CATIA mesh workloads (per-part processing, hashing, assembly picking)
 wasm/         kcore exports for the browser (nightly, real atomics: wasm/build.sh)
-web/          mesh.html (viewer: WebGL, else the CPU renderer: raster.js driving kcore::raster in k.wasm on 4 threads),
-              render_test.html (renderer vs exact ray casting over 14 directions x 7 distances x 2 pans per model: cracks,
-              spills, occlusion, outline, determinism incl. 1 vs 4 threads, 800x600 budget 3.3 ms), bench.html (frame times),
+web/          mesh.html (viewer: WebGL, else the CPU renderer: raster.js driving kcore::raster in k.wasm on 4 threads; it
+              draws the coarsest detail level within 1 px of the full mesh), render_test.html (renderer vs exact ray
+              casting over 14 directions x 7 distances x 2 pans per model and per detail level: cracks, spills, occlusion,
+              outline, determinism incl. 1 vs 4 threads; 800x600 budget 3.3 ms for the picked level), bench.html (frame times),
               index.html (WASM tests), serve.py (COOP/COEP, POST /result)
 tools/        export_parts.py (CATIA -> PLY via cadcli)
 ```

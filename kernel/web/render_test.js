@@ -8,7 +8,7 @@
 //   occluded renderer shows a different, farther or nearer surface (depth order or culling error)
 // Plus: determinism (same frame twice, and 1 vs 4 workers, give identical buffers), timing per model and resolution
 // against the budget, degenerate sizes.
-import { prepare, camera, createRenderer, NEAR } from './raster.js';
+import { prepare, camera, createRenderer, createLodRenderer, pickLevel, NEAR } from './raster.js';
 
 // frame budget at 800x600: 60 fps x 5 (3.3 ms)
 const BUDGET_MS = 1000 / 60 / 5;
@@ -218,7 +218,12 @@ try {
   let failures = 0;
   const perf = [];
   for (const name of list) {
-    const m = prepare(await (await fetch('meshes/' + name)).arrayBuffer());
+    const M = prepare(await (await fetch('meshes/' + name)).arrayBuffer());
+    // every detail level is checked as a mesh of its own; frame times are of the level the camera picks
+    const L = await createLodRenderer(M);
+    for (let lv = 0; lv < M.levels.length; lv++) {
+    if (params.has('lv') && +params.get('lv') !== lv) continue;
+    const m = M.levels[lv];
     const R = await createRenderer(m), R1 = await createRenderer(m, 1); // reorders m's triangles: before the BVH
     const acc = bvh(m);
     const tot = { ok: 0, hole: 0, spill: 0, occluded: 0, outline: 0 };
@@ -240,14 +245,16 @@ try {
       const ts = [];
       for (const dir of dirs) {
         const c = camera(dir, [0, 0], 2.5), rs = [];
-        await R.render(c, w, h, { edges: true });
-        for (let i = 0; i < 5; i++) { const t0 = performance.now(); await R.render(c, w, h, { edges: true }); rs.push(performance.now() - t0); }
+        await L.render(c, w, h, { edges: true });
+        for (let i = 0; i < 5; i++) { const t0 = performance.now(); await L.render(c, w, h, { edges: true }); rs.push(performance.now() - t0); }
         ts.push(Math.min(...rs));
       }
       ts.sort((x, y) => x - y);
       return [ts[ts.length >> 1], ts[ts.length - 1]];
     };
-    const [t800, w800] = await time(800, 600), [t400] = await time(400, 300), [t1080] = quick ? [0] : await time(1920, 1080);
+    // frame times only once per model (they are of the picked level, not of this one)
+    const [t800, w800] = lv ? [0, 0] : await time(800, 600), [t400] = lv ? [0] : await time(400, 300), [t1080] = quick || lv ? [0] : await time(1920, 1080);
+    const picked = pickLevel(M, camera([0, 0], [0, 0], 2.5), 600);
     // degenerate sizes must not throw
     for (const [w, h] of [[1, 1], [7, 5], [3, 200]]) await R.render(cam, w, h, {});
     const errs = tot.hole + tot.spill + tot.occluded;
@@ -255,9 +262,10 @@ try {
     const det = ha === hb && ha === h1;
     const ok = errs === 0 && det && outlineRate < 1e-4 && w800 <= BUDGET_MS;
     failures += ok ? 0 : 1;
-    perf.push({ name, nt: m.nt, t800: w800, t400, t1080 });
-    log(`${ok ? 'PASS' : 'FAIL'} ${name.padEnd(24)} ${String(m.nt).padStart(7)} tris ${m.closed ? 'closed' : 'open  '} | ${views} views, ${tot.ok + errs + tot.outline} samples: crack ${tot.hole} spill ${tot.spill} occluded ${tot.occluded} (outline 1px ${tot.outline}) | deterministic ${det} (1 vs ${R.threads} threads) | 800x600 ${t800.toFixed(2)} ms (worst ${w800.toFixed(2)}), 400x300 ${t400.toFixed(2)} ms${t1080 ? `, 1920x1080 ${t1080.toFixed(2)} ms` : ''}`);
+    if (!lv) perf.push({ name, nt: M.levels[picked].nt, t800: w800, t400, t1080 });
+    log(`${ok ? 'PASS' : 'FAIL'} ${(lv ? `  level ${lv} (dev ${(m.err / 2).toExponential(1)} of diag)` : name).padEnd(24)} ${String(m.nt).padStart(7)} tris ${m.closed ? 'closed' : 'open  '} | ${views} views, ${tot.ok + errs + tot.outline} samples: crack ${tot.hole} spill ${tot.spill} occluded ${tot.occluded} (outline 1px ${tot.outline}) | deterministic ${det} (1 vs ${R.threads} threads) ${lv ? '' : ` | picked level ${picked} (${M.levels[picked].nt} tris) 800x600 ${t800.toFixed(2)} ms (worst ${w800.toFixed(2)}), 400x300 ${t400.toFixed(2)} ms${t1080 ? `, 1920x1080 ${t1080.toFixed(2)} ms` : ''}`}`);
     for (const wv of worst.slice(0, 3)) log(`     view dir ${wv.dir.map(x => x.toFixed(2))} dist ${wv.dist} pan ${wv.pan}: hole ${wv.hole} spill ${wv.spill} occluded ${wv.occluded} e.g. ${JSON.stringify(wv.bad)}`);
+    }
   }
   const worstT = perf.reduce((a, b) => (b.t800 > a.t800 ? b : a), perf[0]);
   log(`\n${failures === 0 ? 'ALL PASS' : failures + ' FAILED'} | slowest 800x600 view: ${worstT.name} ${worstT.t800.toFixed(2)} ms (budget ${BUDGET_MS.toFixed(2)} ms) (${(worstT.nt / worstT.t800 / 1000).toFixed(2)} M tris/s)`);
