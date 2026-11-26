@@ -15,13 +15,14 @@
   <label><input type="checkbox" id="faces" checked> face colours</label>
   <div id="info">drag: rotate · shift+drag / right-drag: pan · wheel: zoom</div>
 </div>
-<script>
+<script type="module">
+import { prepare, camera, render } from './raster.js';
 // Minimal WebGL viewer for `brep mesh --out web/meshes` files (u32 nv, u32 nt, f32 xyz*nv, u32 3*nt, u32 face*nt).
 // Flat shading per triangle, one colour per B-rep face, optional triangle edges.
 const cv = document.getElementById('c');
 // WebGL 2, else WebGL 1 (same GLSL 100 shaders, no vertex array objects), else a slow Canvas-2D fallback
 const gl = cv.getContext('webgl2', { antialias: true }) || cv.getContext('webgl', { antialias: true }) || null;
-const glName = !gl ? 'software renderer (no WebGL in this browser)' : (typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) ? 'WebGL 2' : 'WebGL 1';
+const glName = !gl ? 'CPU renderer (no WebGL in this browser)' : (typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext) ? 'WebGL 2' : 'WebGL 1';
 const ctx2 = gl ? null : cv.getContext('2d');
 const info = document.getElementById('info'), sel = document.getElementById('file');
 const vs = `attribute vec3 p; attribute vec3 n; attribute vec3 col; uniform mat4 mvp; uniform mat3 nm; varying vec3 vn; varying vec3 vc;
@@ -41,6 +42,7 @@ function hue(i) { const h = (i * 0.61803398875) % 1, s = 0.45, v = 0.9; const k 
 
 async function load(name) {
   const b = await (await fetch('meshes/' + name)).arrayBuffer(), dv = new DataView(b);
+  if (!gl) { soft = prepare(b); frame = null; info.textContent = `${name}: ${soft.nv} vertices, ${soft.nt} triangles, ${new Set(soft.F).size} faces · ${glName}`; mesh = {}; draw(); return; }
   const nv = dv.getUint32(0, true), nt = dv.getUint32(4, true);
   const P = new Float32Array(b, 8, nv * 3), T = new Uint32Array(b, 8 + nv * 12, nt * 3), F = new Uint32Array(b, 8 + nv * 12 + nt * 12, nt);
   // unindexed flat-shaded triangles; edges as lines
@@ -66,52 +68,12 @@ async function load(name) {
 }
 
 function mul(a, b) { const r = new Float32Array(16); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k]; r[i * 4 + j] = s; } return r; }
-// Canvas fallback without WebGL: software rasterizer with a per-pixel depth buffer (correct at every angle);
-// half resolution while dragging
-let lowRes = false;
-function draw2d(R, V, W, H) {
+// without WebGL: the tested CPU renderer (raster.js); half resolution while dragging
+let lowRes = false, soft = null, frame = null;
+function draw2d(W, H) {
   const k = lowRes ? 2 : 1, w = Math.max(1, (W / k) | 0), h = Math.max(1, (H / k) | 0);
-  const { pos, nor, col, nt } = mesh, f = 1 / Math.tan(0.4) * h / 2, near = 1e-3;
-  const img = ctx2.createImageData(w, h), px = new Uint32Array(img.data.buffer), zb = new Float32Array(w * h).fill(Infinity);
-  px.fill(0xff211d1b);
-  const faces = document.getElementById('faces').checked, wire = document.getElementById('wire').checked && !lowRes;
-  const X = new Float32Array(3), Y = new Float32Array(3), Z = new Float32Array(3);
-  for (let t = 0; t < nt; t++) {
-    let behind = false;
-    for (let j = 0; j < 3; j++) {
-      const i = 3 * (3 * t + j), x = pos[i], y = pos[i + 1], z0 = pos[i + 2];
-      const cx = R[0] * x + R[4] * y + R[8] * z0 + V[12], cy = R[1] * x + R[5] * y + R[9] * z0 + V[13], cz = R[2] * x + R[6] * y + R[10] * z0 + V[14];
-      if (-cz < near) { behind = true; break; }
-      X[j] = w / 2 + f * cx / -cz; Y[j] = h / 2 - f * cy / -cz; Z[j] = -cz;
-    }
-    if (behind) continue;
-    const area = (X[1] - X[0]) * (Y[2] - Y[0]) - (X[2] - X[0]) * (Y[1] - Y[0]);
-    if (area === 0) continue;
-    const n0 = nor[9 * t], n1 = nor[9 * t + 1], n2 = nor[9 * t + 2];
-    const nx = R[0] * n0 + R[4] * n1 + R[8] * n2, ny = R[1] * n0 + R[5] * n1 + R[9] * n2, nz = R[2] * n0 + R[6] * n1 + R[10] * n2;
-    const d = 0.25 + 0.75 * Math.abs(0.4 * nx + 0.6 * ny + nz) / 1.2329;
-    const c = faces ? [col[9 * t], col[9 * t + 1], col[9 * t + 2]] : [0.8, 0.8, 0.8];
-    const rgb = 0xff000000 | (Math.min(255, 255 * c[2] * d) << 16) | (Math.min(255, 255 * c[1] * d) << 8) | Math.min(255, 255 * c[0] * d);
-    const x0 = Math.max(0, Math.floor(Math.min(X[0], X[1], X[2]))), x1 = Math.min(w - 1, Math.ceil(Math.max(X[0], X[1], X[2])));
-    const y0 = Math.max(0, Math.floor(Math.min(Y[0], Y[1], Y[2]))), y1 = Math.min(h - 1, Math.ceil(Math.max(Y[0], Y[1], Y[2])));
-    const inv = 1 / area, A = Math.abs(area);
-    // pixel distance to the edge opposite vertex i is b_i * |area| / length_i
-    const l0 = A / Math.hypot(X[1] - X[2], Y[1] - Y[2]), l1 = A / Math.hypot(X[2] - X[0], Y[2] - Y[0]), l2 = A / Math.hypot(X[0] - X[1], Y[0] - Y[1]);
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
-        const sx = x + 0.5, sy = y + 0.5;
-        const b0 = ((X[1] - sx) * (Y[2] - sy) - (X[2] - sx) * (Y[1] - sy)) * inv;
-        const b1 = ((X[2] - sx) * (Y[0] - sy) - (X[0] - sx) * (Y[2] - sy)) * inv;
-        const b2 = 1 - b0 - b1;
-        if (b0 < 0 || b1 < 0 || b2 < 0) continue;
-        const z = b0 * Z[0] + b1 * Z[1] + b2 * Z[2], o = y * w + x;
-        if (z < zb[o]) {
-          zb[o] = z;
-          px[o] = wire && (b0 * l0 < 0.6 || b1 * l1 < 0.6 || b2 * l2 < 0.6) ? 0xff100f0d : rgb;
-        }
-      }
-    }
-  }
+  frame = render(soft, camera(rot, pan, dist), w, h, { edges: document.getElementById('wire').checked && !lowRes, faces: document.getElementById('faces').checked }, frame);
+  const img = new ImageData(new Uint8ClampedArray(frame.color.buffer), w, h);
   if (k === 1) ctx2.putImageData(img, 0, 0);
   else { const tmp = document.createElement('canvas'); tmp.width = w; tmp.height = h; tmp.getContext('2d').putImageData(img, 0, 0); ctx2.imageSmoothingEnabled = false; ctx2.drawImage(tmp, 0, 0, W, H); }
 }
@@ -120,8 +82,7 @@ function draw() {
   if (!gl) {
     const w = cv.clientWidth * devicePixelRatio, h = cv.clientHeight * devicePixelRatio;
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
-    const [ax, ay] = rot, cx = Math.cos(ax), sx = Math.sin(ax), cy = Math.cos(ay), sy = Math.sin(ay);
-    draw2d([cy, sx * sy, -cx * sy, 0, 0, cx, sx, 0, sy, -sx * cy, cx * cy, 0, 0, 0, 0, 1], [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, pan[0], pan[1], -dist, 1], w, h);
+    draw2d(w, h);
     return;
   }
   const w = cv.clientWidth * devicePixelRatio, h = cv.clientHeight * devicePixelRatio;
