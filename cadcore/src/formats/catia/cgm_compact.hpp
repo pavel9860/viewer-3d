@@ -80,11 +80,14 @@ struct CompactLayout {
     bool compact_ints = false;   // small integers as signed compact integers
     bool edge_curve_ref = true;  // edges reference their edge curve
     bool derived = false;        // 2012+: values derived from other records (see canonical_records)
+    bool fall2009 = false;       // 2009Fall: the varint dialect's grammar with absolute references
+                                 // (cgm_compact2009.cpp)
 };
 
 // The layout of a compact stream whose bodies this module decodes (2011Spring: b5|bf 75|77;
 // 2011Fall: 06 b5 75, the 2011Spring grammar with compact integers and edge-curve references;
-// 2012+: 08 b5 75); nullopt otherwise (2009Fall streams, not decoded yet).
+// 2012+: 08 b5 75; 2009Fall: directory levels 83..85, feature byte 0 bit 3 for compact integers);
+// nullopt otherwise.
 std::optional<CompactLayout> compact_layout(const Stream& s);
 
 struct Canonical {
@@ -102,6 +105,9 @@ Canonical canonical(const Record& r, const CompactLayout& layout);
 // canonical form empty) for a record that did not decode. Layouts with derived values (2012+)
 // resolve them in passes: surfaces (parameter boxes), p-curves (ranges), edge curves (ranges),
 // points, then the rest.
+// One record of a 2009Fall stream in canonical form (grammar in cgm_compact2009.cpp).
+Canonical canonical_2009(const Record& r, bool compact_ints);
+
 struct CanonicalRecord { Canonical c; std::string error; };
 std::vector<CanonicalRecord> canonical_records(const Stream& s, const CompactLayout& layout);
 

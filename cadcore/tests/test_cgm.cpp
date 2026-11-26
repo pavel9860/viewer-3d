@@ -114,6 +114,37 @@ TEST_CASE("CGM compact corpus part (2011Fall): B-rep decode") {
     CHECK(ir.skipped.empty());
 }
 
+TEST_CASE("CGM compact corpus parts (2009Fall): compact and raw integers") {
+    // feature byte 0: 0b compact integers, 01 raw (the varint dialect's i16 / i32)
+    const fs::path base = fs::path(CADCORE_SAMPLES_DIR) / "caa/caadoc";
+    const struct { const char* path; std::uint8_t f0; std::size_t faces; } parts[] = {
+        {"CAAElecHarnessItf.edu/CNext/resources/graphic/CAA_EHIMultiBranchableSample/PN-06122000-0836.CATPart", 0x0b, 22},
+        {"CAAStructureInterfaces.edu/CNext/resources/graphic/WT15x54.CATPart", 0x01, 0},
+    };
+    for (const auto& pt : parts) {
+        const fs::path p = base / pt.path;
+        if (!fs::exists(p)) continue;
+        const auto file = load(p);
+        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+        REQUIRE(st.has_value());
+        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
+        CHECK(fr.level >= 83);
+        CHECK(fr.level <= 85);
+        REQUIRE(!fr.features.empty());
+        CHECK(fr.features[0] == pt.f0);
+        const auto layout = cgm::compact_layout(fr);
+        REQUIRE(layout.has_value());
+        CHECK(layout->fall2009);
+        CHECK(layout->compact_ints == ((pt.f0 & 8) != 0));
+        for (const auto& c : cgm::canonical_records(fr, *layout)) CHECK(c.error.empty());
+        if (pt.faces) {
+            const cgm::Ir ir = cgm::decode(fr);
+            CHECK(ir.faces.size() == pt.faces);
+            CHECK(ir.skipped.empty());
+        }
+    }
+}
+
 TEST_CASE("CGM points: parameters are offsets within a Hermite segment") {
     // Points store (offset, segment number); segment numbers are shifted by the knot vector's offset
     // field (-7 on trimmed curves of this part). Every coedge range must lie on its Hermite curve.

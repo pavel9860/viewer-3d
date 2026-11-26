@@ -159,3 +159,23 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
 - vs stored tessellation: all 4 are closed (no open edges), and every stored vertex is within 1.4e-4 of
   our mesh (well under 1e-3 of the diagonal). The volume differences (0.02% to 3.4%) come from
   CATIA's coarse stored mesh.
+
+## 2009Fall compact layout (directory levels 83-85)
+- Bodies use the varint dialect's grammar: references are varint counts and absolute varint ids.
+  Header feature byte 0 is `0b` (bit 3: scalar integers as compact signed integers) or `01` (raw
+  i16 / i32, as in the varint dialect). This is the same bit as in 2011Spring. 63 of 65 parts are
+  `0b`; 2 are `01`. The ±1 sequences of shells and loops are raw i16 in both forms.
+- Class differences from the varint dialect:
+  - Lines take an int form (0 general, 1 / 2 axis-parallel, as in 2011Spring).
+  - Hermite curves: after the value count, compact streams repeat the knot vector's fifth field. That
+    field is b, the number of knots before parameter 0. After t0 t1 comes an int −2.
+  - Edge curves end with an i32. Edge curves that list their curves twice (A B A B) add two ints
+    (not decoded).
+  - Loops always carry the closing int c; c ≠ 0 adds the 73-byte block (4 f64, 4 ints, u8, 24 bytes).
+- Every record of the corpus's 65 2009Fall parts (219,050) is consumed exactly by this grammar.
+  Records of 4 parts saved by V5R10 / V5R17 show the same structure. The twins were edited between
+  saves, so their doubles differ in low bits and pairing is not byte-exact.
+- Results: 9,955 of 11,107 faces decode. The rest are classes not decoded in any dialect (211, 216,
+  251, code 33). vs stored tessellation: 41 complete parts (25 within 1%, 9 within 5%), 13 partial,
+  11 without a stored mesh. On 39 parts every stored vertex lies on our surfaces. Polia inferior's far
+  vertices lie on its 6 skipped fillet (216) faces.

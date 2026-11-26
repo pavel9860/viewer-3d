@@ -49,6 +49,7 @@ add_library(cadcore STATIC
   src/formats/catia/cgm.cpp
   src/formats/catia/cgm_model.cpp
   src/formats/catia/cgm_compact.cpp
+  src/formats/catia/cgm_compact2009.cpp
   src/formats/drc.cpp
   src/formats/dxf.cpp
   src/formats/dxf/groups.cpp
