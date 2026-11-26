@@ -744,6 +744,7 @@ static int cmd_cgm(int argc, char** argv) {
 static int cmd_cgmrec(int argc, char** argv) {
     if (argc < 3) return 2;
     auto bytes = read_file(argv[2]);
+    const bool with_body = argc > 3 && std::string(argv[3]) == "--raw";  // every record's stored body too
     namespace cgm = formats::catia::cgm;
     try {
         const auto st = cgm::find_stream(ByteView(bytes.data(), bytes.size()));
@@ -778,6 +779,10 @@ static int cmd_cgmrec(int argc, char** argv) {
             for (std::size_t j = 0; j < refs.size(); ++j) std::printf("%s%u", j ? "," : "", refs[j]);
             std::printf("],\"p\":\"");
             for (std::size_t j = 0; j < p.size; ++j) std::printf("%c%c", hex[p[j] >> 4], hex[p[j] & 15]);
+            if (with_body) {
+                std::printf("\",\"body\":\"");
+                for (std::size_t j = 0; j < r.body.size; ++j) std::printf("%c%c", hex[r.body[j] >> 4], hex[r.body[j] & 15]);
+            }
             std::printf("\"}\n");
         }
     } catch (const std::exception& e) {
@@ -851,6 +856,6 @@ int main(int argc, char** argv) {
     if (cmd == "streams") return cmd_streams(argc, argv);
     if (cmd == "cgm") return cmd_cgm(argc, argv);
     if (cmd == "cgmrec") return cmd_cgmrec(argc, argv);
-    std::fprintf(stderr, "usage: cadcli info FILE... | gen OUT_DIR | corpus DIR... | bench FILE [N] | compare A B TOL | triangles FILE | ply FILE OUT | svg FILE OUT [PX] | benchsuite DIR... [--write F] [--check F] | tree FILE | objects CATIA_FILE [CLASS] | streams CATIA_FILE | cgm CATPART [OUT.cgmir] [--pending] | cgmrec CATPART\n");
+    std::fprintf(stderr, "usage: cadcli info FILE... | gen OUT_DIR | corpus DIR... | bench FILE [N] | compare A B TOL | triangles FILE | ply FILE OUT | svg FILE OUT [PX] | benchsuite DIR... [--write F] [--check F] | tree FILE | objects CATIA_FILE [CLASS] | streams CATIA_FILE | cgm CATPART [OUT.cgmir] [--pending] | cgmrec CATPART [--raw]\n");
     return 2;
 }

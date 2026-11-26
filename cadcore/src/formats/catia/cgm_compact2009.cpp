@@ -9,6 +9,7 @@
 //                   raw i16 in both
 // and these differences per class:
 //   150 line        int form: 0 o d t0 t1; 1 o.x t0 t1 (d = (0, 1)); 2 o.y t0 t1 (d = (1, 0))
+//   170 B-spline    i16 0, knot vector, poles[2], tail (cgm_compact_io.hpp) closing with an int -2
 //   160 Hermite     after the value count (compact streams only) an int equal to the knot vector's fifth
 //                   field; after t0 t1 an int -2
 //   191-193         after the maps an i32; edge curves listing their curves twice (A B A B) add two ints
@@ -34,8 +35,9 @@ std::vector<std::uint32_t> abs_refs(In& in) {
     return r;
 }
 
-// Knot vector -> i32 degree, a, x, n, b, f64 knots[n], i32 multiplicities[n]; returns n and b.
-std::pair<int, int> knot_vector(In& in, Out& o, bool counted = false) {
+// Knot vector -> i32 degree, a, x, n, b, f64 knots[n], i32 multiplicities[n].
+struct Knots { int n = 0, b = 0; std::size_t poles = 0; };
+Knots knot_vector(In& in, Out& o, bool counted = false) {
     if (counted) {  // 216: the section count precedes the knot vector
         const std::int32_t c = in.i32();
         o.i32(c);
@@ -44,8 +46,15 @@ std::pair<int, int> knot_vector(In& in, Out& o, bool counted = false) {
     if (n < 2 || n > 100000 || deg < 1 || deg > 30) bad("knot vector size", in.at);
     o.i32(deg); o.i32(a); o.i32(x); o.i32(n); o.i32(b);
     for (int i = 0; i < n; ++i) o.f64(in.f64());
-    for (int i = 0; i < n; ++i) o.i32(in.i32());
-    return {n, b};
+    std::size_t sum = 0;
+    for (int i = 0; i < n; ++i) {
+        const std::int32_t m = in.i32();
+        if (m < 1 || m > deg + 1) bad("knot multiplicity", in.at);
+        o.i32(m);
+        sum += std::size_t(m);
+    }
+    if (sum < std::size_t(deg) + 2) bad("knot multiplicities", in.at);
+    return {n, b, sum - std::size_t(deg) - 1};
 }
 
 void f64s(In& in, Out& o, std::size_t n) { for (std::size_t i = 0; i < n; ++i) o.f64(in.f64()); }
@@ -141,7 +150,8 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
             f64s(in, o, 5);
             break;
         case 160: {
-            const auto [n, b] = knot_vector(in, o);
+            const auto [n, b, np] = knot_vector(in, o);
+            (void)np;
             const std::int32_t n2 = in.i32();
             if (n2 != n) bad("Hermite value count differs from the knot count", r.offset);
             o.i32(n2);
@@ -154,6 +164,15 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
             if (in.i16() != -2) bad("Hermite closing value", r.offset);
             break;
         }
+        case 170: {
+            if (in.i16() != 0) bad("B-spline p-curve form", r.offset);
+            o.i16(0);
+            const std::size_t np = knot_vector(in, o).poles;
+            if (2 * np > in.left() / 8) bad("B-spline p-curve poles past the record", r.offset);
+            f64s(in, o, 2 * np);
+            bspline_pcurve_tail(in, o);
+            break;
+        }
         case 231:
             knot_vector(in, o);
             knot_vector(in, o);
@@ -164,8 +183,9 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
         case 525: o.i32(in.i32()); o.i16(in.i16()); break;
         // the decoder uses the references and the leading doubles of these (cgm_model.hpp)
         case 216: {
-            const auto [n, b] = knot_vector(in, o, true);
+            const auto [n, b, np] = knot_vector(in, o, true);
             (void)b;
+            (void)np;
             f64s(in, o, 30 * std::size_t(n) + 4);
             o.raw(in.raw(in.left()));
             break;

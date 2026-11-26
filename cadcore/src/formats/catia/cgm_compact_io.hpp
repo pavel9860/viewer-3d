@@ -75,4 +75,19 @@ struct Out {
     }
 };
 
+// Tail of a 170 B-spline p-curve as stored (2009Fall, 2011Spring): int a, int b, f64 0 L 1 0 (L: a knot
+// interval), u8 c, [c != 0: further fields, kept as written; not decoded], int -2. The varint dialect's
+// form drops the closing -2.
+inline void bspline_pcurve_tail(In& in, Out& o) {
+    o.i16(in.i16());
+    o.i16(in.i16());
+    for (int i = 0; i < 4; ++i) o.f64(in.f64());
+    const std::uint8_t c = in.u8();
+    o.u8(c);
+    const std::size_t close = in.ci ? 1 : 2;  // int -2
+    if (in.left() < close) bad("B-spline p-curve closing value", in.at);
+    if (c) o.raw(in.raw(in.left() - close));
+    if (in.i16() != -2) bad("B-spline p-curve closing value", in.at);
+}
+
 }  // namespace cadcore::formats::catia::cgm::compact_io

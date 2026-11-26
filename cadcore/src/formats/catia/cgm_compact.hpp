@@ -34,6 +34,8 @@
 //   knot vector     int degree, int n, u8 z (4: x = 0, omitted; 0: int x follows), f64 knots[n], u8 1
 //                   (standard multiplicities: ends degree + 1, interior degree - 2)
 //   160 Hermite     ref, knot vector, i16 n, i16 x, P D1, int has2, [D2], t0 t1, i16 -2
+//   170 B-spline    ref, i16 0, knot vector, poles[np][2] (f64), int a, int b, f64 0 L 1 0, u8 c, [c != 0:
+//   p-curve         further fields, not decoded], int -2
 //   231 NURBS       knot vectors u v, int rational, poles (v fastest), [weights], a 152- or 154-byte
 //                   block (not decoded)
 //   200 plane       o, u8 m (bits 0-5: U V component is zero; 6: scale (1, 1); 7: default box), rest
@@ -47,6 +49,8 @@
 // values that equal parameters of other records are omitted (verified by closure: the p-curves of
 // every checked edge curve meet in 3D, and every checked vertex parameter lands on all its curves):
 //   knot vector     form byte bit 3: standard multiplicities, the multiplicity byte is omitted
+//   170 B-spline    ref, form byte 0x1e, f64 L (the knot range's length), knot vector, poles; the tail
+//   p-curve         takes its usual values (a 1, b n - 1, 0 L 1 0, c 0) and the closing int is omitted
 //   520 shell       some shells carry one 0 byte before the bits (the record length decides)
 //   200 plane       int v; bits 0-2: origin component zero; 3: U is the unit vector of its one free
 //                   component; 4-6: U component zero; 7, 8-10: the same for V; 11: scale (1, 1);

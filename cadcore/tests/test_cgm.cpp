@@ -188,6 +188,49 @@ TEST_CASE("CGM pending surface kinds: fillets (216) and revolutions (211)") {
     }
 }
 
+TEST_CASE("CGM pending p-curve kind: B-splines (170, compact code 33)") {
+    // one part per stored form: 2011Spring raw integers, 2015Fall packed form byte, 2009Fall compact
+    // integers. Emitted only on request; every coedge range lies in its knot range (vertex parameters
+    // are offsets within a knot segment, the first segment starting at the first knot)
+    const fs::path base = fs::path(CADCORE_SAMPLES_DIR);
+    const struct { const char* path; std::size_t faces, decoded; } parts[] = {
+        {"local/d04dc2b9", 299, 299},
+        {"local/5838914f", 507, 507},
+        {"github/catia-v5/Guilherme115__Motor-V6/05_Admissao_Escape/Duto.CATPart", 379, 351},
+    };
+    for (const auto& pt : parts) {
+        const fs::path p = base / pt.path;
+        if (!fs::exists(p)) continue;
+        const auto file = load(p);
+        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+        REQUIRE(st.has_value());
+        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
+        const cgm::Ir plain = cgm::decode(fr);
+        CHECK(plain.faces.size() < pt.decoded);
+        for (const auto& c : plain.pcurves) CHECK(c.kind != cgm::PcBSpline);
+        cgm::DecodeOptions opt;
+        opt.pending_kinds = true;
+        const cgm::Ir ir = cgm::decode(fr, {}, opt);
+        CHECK(ir.faces.size() == pt.decoded);
+        CHECK(ir.faces.size() + ir.skipped.size() >= pt.faces);
+        std::size_t n = 0;
+        for (const auto& ce : ir.coedges) {
+            const auto& c = ir.pcurves.at(ce.pcurve);
+            if (c.kind != cgm::PcBSpline) continue;
+            ++n;
+            const std::size_t deg = std::size_t(c.p.at(0)), nk = std::size_t(c.p.at(1)), np = std::size_t(c.p.at(2 + nk));
+            REQUIRE(nk == np + deg + 1);
+            REQUIRE(c.p.size() == 4 + nk + 2 * np);
+            const double lo = c.p[2 + deg], hi = c.p[2 + nk - deg - 1], tol = 1e-4 * (hi - lo);
+            CHECK(ce.t0 >= lo - tol);
+            CHECK(ce.t0 <= hi + tol);
+            CHECK(ce.t1 >= lo - tol);
+            CHECK(ce.t1 <= hi + tol);
+        }
+        CHECK(n > 0);
+    }
+}
+
 TEST_CASE("CGM points: parameters are offsets within a Hermite segment") {
     // Points store (offset, segment number); segment numbers are shifted by the knot vector's offset
     // field (-7 on trimmed curves of this part). Every coedge range must lie on its Hermite curve.

@@ -156,7 +156,7 @@ private:
     }
 
     void pending(const Obj& o, const char* what) const {
-        if (!opt_.pending_kinds) throw DecodeError(ErrorCode::Unsupported, "surface type " + std::to_string(o.type) + " (" + what + ") awaits kernel support", o.at);
+        if (!opt_.pending_kinds) throw DecodeError(ErrorCode::Unsupported, "class " + std::to_string(o.type) + " (" + what + ") awaits kernel support", o.at);
     }
 
     // A revolution's profile (cgm_model.hpp SurfRevolution): edge curves stand for their first curve.
@@ -168,7 +168,7 @@ private:
         const Obj& o = obj(c);
         Rd r = rd(o);
         switch (o.type) {
-            case 150: case 151: case 160:
+            case 150: case 151: case 160: case 170:
                 p.push_back(1);
                 p.push_back(double(pcurve(c)));
                 return;
@@ -350,6 +350,23 @@ private:
                 if (has2) for (std::size_t i = 0; i < 2 * n; ++i) pc.p.push_back(r.f64());
                 break;
             }
+            case 170: {
+                pending(o, "B-spline p-curve");
+                pc.kind = PcBSpline;
+                if (r.i16() != 0) bad("B-spline p-curve form", r.at + r.k);
+                const KnotVector kv = knot_vector(r);
+                const std::size_t np = kv.poles();
+                pc.p.push_back(double(kv.degree));
+                std::vector<double> knots;
+                for (std::size_t i = 0; i < kv.knots.size(); ++i)
+                    for (int m = 0; m < kv.mults[i]; ++m) knots.push_back(kv.knots[i]);
+                pc.p.push_back(double(knots.size()));
+                pc.p.insert(pc.p.end(), knots.begin(), knots.end());
+                pc.p.push_back(double(np));
+                pc.p.push_back(0.0);  // not rational
+                for (std::size_t i = 0; i < 2 * np; ++i) pc.p.push_back(r.f64());
+                break;
+            }
             default: throw DecodeError(ErrorCode::Unsupported, "p-curve type " + std::to_string(o.type), o.at);
         }
         const auto i = std::uint32_t(out_.pcurves.size());
@@ -417,17 +434,19 @@ private:
     }
 
     // Start parameter of segment `span` (1-based) of curve `c`: a point's parameter is an offset
-    // within that segment. Hermite p-curves have one segment per knot interval; an edge curve's
+    // within that segment. Hermite and B-spline p-curves have one segment per knot interval; an edge curve's
     // parameter is its first curve's. Single-segment curves only use span 1.
     double span_start(std::uint32_t c, std::int32_t span, std::size_t at) {
-        if (span == 1) return 0;
         const Obj& o = obj(c);
         if (is_edge_curve(o.type)) return span_start(first(o), span, at);
-        if (o.type == 160) {
+        // B-spline segments start at their knots, the first one included (a knot range need not start at 0)
+        if (span == 1 && o.type != 170) return 0;
+        if (o.type == 160 || o.type == 170) {
             Rd r = rd(o);
+            if (o.type == 170) r.i16();
             const KnotVector kv = knot_vector(r);
             const std::int32_t j = span + kv.first;  // segment numbers are shifted by the knot vector's offset field (<= 0)
-            if (j < 1 || std::size_t(j) >= kv.knots.size()) bad("point segment " + std::to_string(span) + " outside Hermite curve " + std::to_string(c) + " (first " + std::to_string(kv.first) + ", " + std::to_string(kv.knots.size()) + " knots)", at);
+            if (j < 1 || std::size_t(j) >= kv.knots.size()) bad("point segment " + std::to_string(span) + " outside curve " + std::to_string(c) + " (first " + std::to_string(kv.first) + ", " + std::to_string(kv.knots.size()) + " knots)", at);
             return kv.knots[std::size_t(j) - 1];
         }
         throw DecodeError(ErrorCode::Unsupported, "point segment " + std::to_string(span) + " on curve type " + std::to_string(o.type), at);
@@ -440,10 +459,12 @@ private:
         const std::uint32_t n = r.count();
         if (n != pt.refs.size()) bad("point parameter count differs from its curves", pt.at);
         std::vector<double> q(n);
-        for (std::uint32_t i = 0; i < n; ++i) { q[i] = r.f64(); q[i] += span_start(pt.refs[i], r.i32(), pt.at); }
+        std::vector<std::int32_t> span(n);
+        for (std::uint32_t i = 0; i < n; ++i) { q[i] = r.f64(); span[i] = r.i32(); }
         if (r.left() != 0) bad("point payload length", pt.at);
+        // a curve's segment start is read only when that curve is tried (the others may not have decoded)
         for (std::uint32_t i = 0; i < n; ++i)
-            if (auto t = through(pt.refs[i], q[i], pc, 0)) return *t;
+            if (auto t = through(pt.refs[i], q[i] + span_start(pt.refs[i], span[i], pt.at), pc, 0)) return *t;
         throw DecodeError(ErrorCode::Unsupported, "p-curve " + std::to_string(pc) + " not reachable from point " + std::to_string(point), pt.at);
     }
 

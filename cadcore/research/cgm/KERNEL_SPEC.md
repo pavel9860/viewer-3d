@@ -1,4 +1,4 @@
-# Pending IR surface kinds (cadcore → kernel)
+# Pending IR kinds (cadcore → kernel)
 
 These kinds are decoded by cadcore, but the kernel's IR reader (`kernel/brep/src/cgm.rs`, `surface()`) does
 not evaluate them yet. An unknown kind makes the kernel reject the whole IR file. To keep that from
@@ -58,10 +58,23 @@ p(u, v) = c + (sin(th - f) (p1 - c) + sin f (p2 - c)) / sin th,   f = th (v - v0
 - Not verified: whether f is linear in v. The surface's shape does not depend on that choice, but interior
   trimming curves in v would. No case in the corpus could distinguish it.
 
+## P-curve kind 4: B-spline (CGM class 170, compact code 33)
+
+```
+p = degree nk | knots[nk] | np rational | poles[np][2] | weights[np if rational]
+(u, v)(t) = sum_i N_i,degree(t) P_i        (rational: sum w_i N_i P_i / sum w_i N_i)
+```
+
+- The knots are expanded (already repeated by multiplicity), so nk = np + degree + 1. Every corpus
+  instance is non-rational. The flag is there so the layout matches the 3D B-spline profile of kind 9.
+- t is the knot parameter. Coedge ranges lie in [knots[degree], knots[nk - degree - 1]], which need
+  not start at 0. 59 coedges go past it by less than 1e-3 of the range (vertex tolerance), so
+  evaluate slightly past the ends by extending the end spans, not by clamping.
+- Revolution (kind 9) profiles of form 1 may now point at a kind-4 p-curve.
+- Evidence: on 34 parts, edges whose other coedge decodes meet within 3.3e-15 of the part size (one
+  edge excepted, an open line-parameter case in cadcore; FINDINGS.md).
+- Emitted only with `--pending`, like kinds 9 and 10.
+
 ## Still open (not emitted)
 
 - 251 (refs: a 243 surface and a p-curve) and 243 (about 850 bytes): not decoded.
-- Compact code 33: varint class 170, a B-spline p-curve (refs surface; i16 0, knot vector, 2D poles,
-  37-byte tail). It costs about 5.9k faces in 34 parts and is also the profile of several compact
-  revolutions. The 2012+ form has fields that are still unknown. When it is decoded, it needs a new
-  p-curve kind (2D B-spline).

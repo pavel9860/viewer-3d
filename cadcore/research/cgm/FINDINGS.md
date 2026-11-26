@@ -191,7 +191,23 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   follows a 0 byte; in compact streams it follows directly; a 1 byte means standard multiplicities.
 - 130 (3D B-spline curve, varint): knot vector, i16 rational, poles[3], [weights], tail. 100 (3D line):
   o d, 1.0, t0 t1.
-- 170 = compact code 33 (B-spline p-curve): i16 0, knot vector, 2D poles, tail (two i16, t0 t1, 1.0,
-  0.0, u8). 2009Fall bodies fit; 2012+ bodies have more fields (open).
+- 170 = compact code 33 (B-spline p-curve, non-rational, 2D poles). Varint dialect: refs, i16 0, knot
+  vector, poles, tail i16 1, i16 b (n - 1 in 492 of 495), f64 0 L s 0, u8 c. 2009Fall and 2011Spring
+  add a closing int -2 (and c != 0 adds a few bytes, 3 records, kept raw). 2012+ packs it as form
+  byte 0x1e, f64 L (= the knot range's length), knot vector, poles; the tail is implied. All 31,249
+  code-33 records of the corpus fit (30,732 packed, 495 2011Spring, 22 2009Fall), plus the 24 varint
+  ones. Edge-curve maps use the knot parameter (asma part-8568: map ranges equal the knot ranges).
+- Point parameters on B-splines are offsets within a knot segment, and segment 1 starts at the first
+  knot (or knot x + 1 when the knot vector's x field is set, as for Hermite curves), not at 0: on assembly A
+  part-8568, 1,054 of 1,685 B-spline coedges fell outside their knots with a 0 start. With the rule,
+  31,417 of 31,500 coedges lie in their knot ranges. 59 of the rest are past it by less than 1e-3 of
+  the range (vertex tolerance). 24 in two wheel part parts come from line edge curves with a map 3,
+  where a stored point parameter 3.0 lies on a line whose range is [-19.09, -16.09]: it reads as an
+  offset from the range start, unlike the 98k+ absolute cases in the varint dialect (open).
+- 3D check (indicator): on edges with a second, decodable p-curve, the two curves meet within 3.3e-15
+  of the part size, except that one wheel part edge.
+- Results: default mode 477,290 -> 477,491 faces, with no part losing any. The +201 faces in 8 parts
+  have vertex parameters taken from B-spline knot ranges; their edges meet within 5.5e-7. With
+  `--pending`: 478,815 -> 484,640 faces, and 1,047 -> 1,062 complete parts.
 - With `--pending`: the 108 parts that have 211/216/251 decode 57,211 faces instead of 55,686, and 36 of
   them become complete. The default mode is unchanged across the corpus (477,290 faces).

@@ -53,7 +53,7 @@ void frame_varint(ByteView s, std::size_t dir, bool big, Stream& out) {
 std::uint16_t compact_class(std::uint8_t code) {
     switch (code) {
         case 2: return 10;    case 4: return 12;    case 5: return 13;    case 6: return 14;    case 14: return 100;
-        case 24: return 150;  case 25: return 151;  case 26: return 152;  case 32: return 160;
+        case 24: return 150;  case 25: return 151;  case 26: return 152;  case 32: return 160;  case 33: return 170;
         case 35: return 191;  case 36: return 192;  case 37: return 193;
         case 29: return 155;
         case 39: return 200;  case 40: return 201;  case 41: return 202;  case 42: return 203;  case 43: return 204;

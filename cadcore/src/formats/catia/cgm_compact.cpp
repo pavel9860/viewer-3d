@@ -428,6 +428,30 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
             if (in.i16() != -2) bad("Hermite closing value", r.offset);
             break;
         }
+        case 170: {
+            // B-spline p-curve -> i16 0, knot vector, poles[2], i16 a, i16 b, f64 0 L 1 0, u8 c, [rest]
+            c.refs = in.refs(1);
+            double span = 0;
+            const bool packed = L.derived;
+            if (packed) {  // 2012+: form byte 0x1e (tail fields at their usual values), L
+                if (in.u8() != 0x1e) throw DecodeError(ErrorCode::Unsupported, "B-spline p-curve form not decoded", r.offset);
+                span = in.f64();
+            } else if (in.i16() != 0) {
+                bad("B-spline p-curve form", r.offset);
+            }
+            o.i16(0);
+            int nk = 0;
+            const std::size_t np = knot_vector(in, o, nk);
+            if (2 * np > in.left() / 8) bad("B-spline p-curve poles past the record", r.offset);
+            for (std::size_t i = 0; i < 2 * np; ++i) o.f64(in.f64());
+            if (packed) {
+                o.i16(1); o.i16(nk - 1); o.f64(0); o.f64(span); o.f64(1); o.f64(0); o.u8(0);
+            } else {
+                bspline_pcurve_tail(in, o);
+            }
+            if (cx) cx->range[r.id] = {load_f64_le(o.p.data() + 22), load_f64_le(o.p.data() + 22 + 8 * std::size_t(nk - 1))};
+            break;
+        }
         case 231: {
             int nu_k = 0, nv_k = 0;
             const std::size_t nu = knot_vector(in, o, nu_k), nv = knot_vector(in, o, nv_k);
