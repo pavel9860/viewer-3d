@@ -51,13 +51,13 @@ struct Rd {
     std::size_t left() const { return b.size - k; }
 };
 
-struct KnotVector { int degree = 0; std::vector<double> knots; std::vector<int> mults; std::size_t poles() const { std::size_t n = 0; for (int m : mults) n += std::size_t(m); return n - std::size_t(degree) - 1; } };
+struct KnotVector { int degree = 0; int first = 0; std::vector<double> knots; std::vector<int> mults; std::size_t poles() const { std::size_t n = 0; for (int m : mults) n += std::size_t(m); return n - std::size_t(degree) - 1; } };
 
 KnotVector knot_vector(Rd& r) {
     KnotVector kv;
     kv.degree = r.i32();
     r.i32();
-    r.i32();
+    kv.first = r.i32();
     const int n = r.i32();
     r.i32();
     if (n < 2 || n > 100000) bad("knot count out of range", r.at + r.k);
@@ -353,6 +353,23 @@ private:
         return std::nullopt;
     }
 
+    // Start parameter of segment `span` (1-based) of curve `c`: a point's parameter is an offset
+    // within that segment. Hermite p-curves have one segment per knot interval; an edge curve's
+    // parameter is its first curve's. Single-segment curves only use span 1.
+    double span_start(std::uint32_t c, std::int32_t span, std::size_t at) {
+        if (span == 1) return 0;
+        const Obj& o = obj(c);
+        if (is_edge_curve(o.type)) return span_start(first(o), span, at);
+        if (o.type == 160) {
+            Rd r = rd(o);
+            const KnotVector kv = knot_vector(r);
+            const std::int32_t j = span + kv.first;  // segment numbers are shifted by the knot vector's offset field (<= 0)
+            if (j < 1 || std::size_t(j) >= kv.knots.size()) bad("point segment " + std::to_string(span) + " outside Hermite curve " + std::to_string(c) + " (first " + std::to_string(kv.first) + ", " + std::to_string(kv.knots.size()) + " knots)", at);
+            return kv.knots[std::size_t(j) - 1];
+        }
+        throw DecodeError(ErrorCode::Unsupported, "point segment " + std::to_string(span) + " on curve type " + std::to_string(o.type), at);
+    }
+
     // Parameter of a point (type 14: parameters on several curves) on p-curve `pc`.
     double point_param(std::uint32_t point, std::uint32_t pc) {
         const Obj& pt = obj(point);
@@ -360,7 +377,7 @@ private:
         const std::uint32_t n = r.count();
         if (n != pt.refs.size()) bad("point parameter count differs from its curves", pt.at);
         std::vector<double> q(n);
-        for (std::uint32_t i = 0; i < n; ++i) { q[i] = r.f64(); r.i32(); }
+        for (std::uint32_t i = 0; i < n; ++i) { q[i] = r.f64(); q[i] += span_start(pt.refs[i], r.i32(), pt.at); }
         if (r.left() != 0) bad("point payload length", pt.at);
         for (std::uint32_t i = 0; i < n; ++i)
             if (auto t = through(pt.refs[i], q[i], pc, 0)) return *t;

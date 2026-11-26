@@ -141,3 +141,13 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   dialect unchanged (120 / 172 within 1%).
 - B-rep-only compact parts (55): the 14 of the 2011Spring family decode completely but hold no solid
   (9 only the origin planes, the rest sheets); the 30 of 2012+ decode (meshes as above); 11 are 2009Fall (bodies not decoded).
+- Points (14), all dialects: per curve (f64 offset, i32 segment number). The parameter is the start of
+  that segment plus the offset; on a Hermite p-curve segment s starts at knot[s + x - 1], x being the
+  knot vector's third int (0, or negative on curves trimmed from a longer one: -7 seen), and an edge
+  curve's parameter is its first curve's. Segment 1 on every other curve. Ignoring the segment cut
+  Hermite edges short (40 of 148 stored vertices off the surfaces on one part, hex-nut chamfers on
+  others). Corpus vs stored tessellation: within 1% 484 -> 501, off 240 -> 226, open edges -1348;
+  31 partial parts gain open edges while their stored vertices now lie on the surfaces (mesher).
+- Volume vs stored tessellation is biased by CATIA's coarse mesh (a 10-gon around a cylinder: +6.9%;
+  thin walls: up to 10%). Stored vertices lying on the decoded surfaces is the sharper check: of 49
+  meshing 2011Spring parts marked off, 40 had every stored vertex on the surfaces.

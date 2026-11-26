@@ -94,3 +94,26 @@ TEST_CASE("CGM compact corpus part (2011Spring): B-rep decode") {
     CHECK(ir.faces.size() == 8);
     CHECK(ir.skipped.empty());
 }
+
+TEST_CASE("CGM points: parameters are offsets within a Hermite segment") {
+    // Points store (offset, segment number); segment numbers are shifted by the knot vector's offset
+    // field (-7 on trimmed curves of this part). Every coedge range must lie on its Hermite curve.
+    const fs::path p = fs::path(CADCORE_SAMPLES_DIR) / "nist/nist-ctc-pmi-cad-models/NIST-CTC-PMI/CATIA V5R21/nist_ctc_02_asme1_ct5210_rc.CATPart";
+    if (!fs::exists(p)) return;
+    const auto file = load(p);
+    const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+    REQUIRE(st.has_value());
+    const cgm::Ir ir = cgm::decode(cgm::frame(ByteView(st->data(), st->size())));
+    std::size_t hermite = 0, outside = 0;
+    for (const auto& c : ir.coedges) {
+        const auto& pc = ir.pcurves[c.pcurve];
+        if (pc.kind != cgm::PcHermite) continue;
+        const auto n = std::size_t(pc.p[0]);
+        const double k0 = pc.p[1], k1 = pc.p[n], tol = 1e-9 * (1 + std::abs(k1));
+        ++hermite;
+        if (std::min(c.t0, c.t1) < k0 - tol || std::max(c.t0, c.t1) > k1 + tol) ++outside;
+    }
+    CHECK(hermite > 100);
+    CHECK(outside == 0);
+    for (const auto& k : ir.skipped) CHECK(k.why.find("point segment") == std::string::npos);
+}
