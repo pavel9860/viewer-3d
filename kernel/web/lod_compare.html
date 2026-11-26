@@ -1,0 +1,36 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Detail level compare</title>
+<style>body{background:#1b1d21;color:#ddd;font:13px system-ui;margin:12px}canvas{width:48%;aspect-ratio:4/3;margin:4px;image-rendering:pixelated}div{margin:6px 4px}</style></head>
+<body>
+<!-- the full mesh and the level the viewer picks, side by side, with the share of differing pixels:
+     lod_compare.html?m=NAME.mesh&rx=0.6&ry=-0.5&d=2.5 -->
+<div id="info">loading</div><div id="out"></div>
+<script type="module">
+import { prepare, camera, createRenderer, pickLevel } from './raster.js';
+const q = new URLSearchParams(location.search);
+const names = (q.get('m') || '1.0.mesh').split(',');
+const cam = camera([+(q.get('rx') ?? 0.6), +(q.get('ry') ?? -0.5)], [0, 0], +(q.get('d') ?? 2.5));
+const [w, h] = [480, 360];
+const out = document.getElementById('out');
+for (const name of names) {
+  const m = prepare(await (await fetch('meshes/' + name)).arrayBuffer());
+  const k = pickLevel(m, cam, h);
+  const row = document.createElement('div');
+  row.textContent = name;
+  out.appendChild(row);
+  const imgs = [];
+  for (const lv of [0, k]) {
+    const r = await createRenderer(m.levels[lv]);
+    const fr = await r.render(cam, w, h, { edges: q.has('edges') });
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const im = new ImageData(w, h); im.data.set(new Uint8Array(fr.color.buffer, fr.color.byteOffset, 4 * w * h));
+    c.getContext('2d').putImageData(im, 0, 0);
+    row.appendChild(c);
+    imgs.push(im.data.slice());
+  }
+  let diff = 0;
+  for (let i = 0; i < w * h; i++) if (imgs[0][4 * i] !== imgs[1][4 * i] || imgs[0][4 * i + 1] !== imgs[1][4 * i + 1] || imgs[0][4 * i + 2] !== imgs[1][4 * i + 2]) diff++;
+  row.append(` left: full mesh ${m.nt} triangles · right: level ${k}, ${m.levels[k].nt} triangles (deviation ${(m.levels[k].err * h / 2 / cam.tanHalf / (Math.hypot(...cam.t) - 1)).toFixed(2)} px or less) · ${(100 * diff / (w * h)).toFixed(2)}% pixels differ`);
+}
+document.getElementById('info').textContent = `${w}x${h}, view ${cam.t[2]}`;
+</script></body></html>
