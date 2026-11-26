@@ -2,7 +2,8 @@
 //!   brep check FILE.stp|LIST.tsv          import + validate
 //!   brep bool FILE.stp|LIST.tsv [SHELLS]  booleans of the largest closed shells with a cylinder through them
 //!   brep mesh FILE.stp|LIST.tsv [CHORD] [--out DIR]   watertight tessellation (chord relative to the model diagonal,
-//!                                         default 1e-3); --out writes DIR/<name>.mesh and DIR/index.json for web/mesh.html
+//!                                         default 1e-3); open shells are sewn first; --out writes DIR/<name>.mesh with detail levels and
+//!                                         DIR/index.json for web/mesh.html
 use brep::boolean::{boolean, Op};
 use brep::geom::*;
 use brep::topo::*;
@@ -97,6 +98,13 @@ fn unmatched(r: &Body, a: &Body, shell: &[Id<Face>], src: &Body) {
 fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
     use brep::tess::{mesh_volume, open_edges, tessellate, Opts};
     let im = match step::import(f) { Ok(i) => i, Err(e) => { println!("{f}: {e}"); return 1 } };
+    let mut im = im;
+    // open shells are sewn at the file's own length tolerance
+    let tol = im.body.tol;
+    let sewn = brep::sew::sew(&mut im.body, tol);
+    let sew_note = if sewn.free_before > 0 {
+        format!(" | sewn: {} free edges -> {}, {} shells -> {} ({} closed), {} orientation conflicts", sewn.free_before, sewn.free_after, sewn.shells_before, sewn.shells_after, sewn.closed_after, sewn.conflicts)
+    } else { String::new() };
     let b = &im.body;
     let t0 = Instant::now();
     let o = Opts { chord, ..Default::default() };
@@ -149,7 +157,7 @@ fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
         write_mesh(dir, f.rsplit('/').next().unwrap(), &all, chord, &lv, im.diag);
     }
     let bad = open + empty + coarse;
-    println!("{:<26} {} faces -> {tris} triangles in {t:.0} ms | open edges {open} non-manifold {nonman} | empty faces {empty} coarse {coarse} | max dev {:.1e} mm | volume mesh/exact {:.6} (worst shell rel {vrel:.1e}){lods}{}",
+    println!("{:<26} {} faces -> {tris} triangles in {t:.0} ms | open edges {open} non-manifold {nonman} | empty faces {empty} coarse {coarse} | max dev {:.1e} mm | volume mesh/exact {:.6} (worst shell rel {vrel:.1e}){sew_note}{lods}{}",
         f.rsplit('/').next().unwrap(), b.faces.len(), dev * im.diag, mv / ev, if bad > 0 { " FAIL" } else { "" });
     bad
 }

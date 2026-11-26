@@ -81,6 +81,8 @@ impl S<'_> {
     /// can a and b merge at p without changing the topology or folding the surface
     fn valid(&self, a: u32, b: u32, p: V) -> bool {
         if self.lock[a as usize] || self.lock[b as usize] { return false; }
+        // bounded valence: keeps the checks local and the triangles well shaped
+        if self.vt[a as usize].len() + self.vt[b as usize].len() > MAX_FAN + 2 { return false; }
         let shared: Vec<u32> = self.vt[a as usize].iter().copied().filter(|t| self.tri[*t as usize].contains(&b)).collect();
         if shared.len() != 2 { return false; }
         let opp: Vec<u32> = shared.iter().map(|&t| self.tri[t as usize].into_iter().find(|&x| x != a && x != b).unwrap()).collect();
@@ -129,9 +131,10 @@ impl S<'_> {
         let qa = self.q[a as usize];
         self.q[b as usize].add(&qa);
         self.gone[a as usize] = true;
+        // only the merged vertex's quadric and position changed: edges between other vertices keep their cost
+        // (their validity is checked when they come up)
         self.stamp[b as usize] += 1;
         self.stamp[a as usize] += 1;
-        for n in self.ring(b) { self.stamp[n as usize] += 1; }
     }
     fn level(&self) -> Level {
         let mut map = vec![u32::MAX; self.pos.len()];
@@ -147,6 +150,9 @@ impl S<'_> {
         l
     }
 }
+
+/// most triangles around a vertex after a collapse
+const MAX_FAN: usize = 24;
 
 type Entry = Reverse<(u64, u32, u32, u32, u32)>;
 
@@ -201,8 +207,10 @@ pub fn levels(pos: &[V], tri: &[[u32; 3]], tag: &[u32], tols: &[f64], workers: u
         let n = s.alive.iter().filter(|x| **x).count();
         if n < last {
             last = n;
+            let t0 = std::time::Instant::now();
             let mut l = s.level();
             l.err = deviation(pos, tri, &l.pos, &l.tri, workers);
+            if std::env::var("BREP_DEBUG").is_ok() { eprintln!("level tol {tol:.1e}: {n} triangles, deviation {:.2e} in {:.0} ms", l.err, t0.elapsed().as_secs_f64() * 1e3); }
             out.push(l);
         }
     }
@@ -226,63 +234,57 @@ pub fn deviation(pa: &[V], ta: &[[u32; 3]], pb: &[V], tb: &[[u32; 3]], workers: 
     far(&sa, &gb).max(far(&sb, &ga))
 }
 
-/// uniform grid of triangle bounding boxes for nearest-triangle distance queries
-struct Grid<'a> { p: &'a [V], t: &'a [[u32; 3]], lo: V, h: f64, n: [i64; 3], start: Vec<u32>, items: Vec<u32> }
+/// bounding-box tree over triangles for nearest-triangle distance queries (branch and bound, nearer child first)
+struct Grid<'a> { p: &'a [V], t: &'a [[u32; 3]], nodes: Vec<([f64; 6], u32, u32)>, order: Vec<u32> }
+
+const LEAF: usize = 4;
 
 impl<'a> Grid<'a> {
     fn new(p: &'a [V], t: &'a [[u32; 3]]) -> Grid<'a> {
-        let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
-        for q in p { for k in 0..3 { lo[k] = lo[k].min(q[k]); hi[k] = hi[k].max(q[k]); } }
-        let ext = sub(hi, lo);
-        let vol = (ext[0].max(1e-12) * ext[1].max(1e-12) * ext[2].max(1e-12)).max(1e-300);
-        let mut h = (vol / t.len().max(1) as f64).cbrt().max(norm(ext) * 1e-4).max(1e-12);
-        let dims = |h: f64| [0, 1, 2].map(|k| (ext[k] / h) as i64 + 1);
-        while dims(h).iter().product::<i64>() > 4 * t.len() as i64 + 64 { h *= 1.25; }
-        let n = dims(h);
-        let cell = |q: V| [0, 1, 2].map(|k| (((q[k] - lo[k]) / h) as i64).clamp(0, n[k] - 1));
-        let idx = |c: [i64; 3]| ((c[2] * n[1] + c[1]) * n[0] + c[0]) as usize;
-        let ncell = (n[0] * n[1] * n[2]) as usize;
-        let mut cnt = vec![0u32; ncell + 1];
-        let boxes: Vec<([i64; 3], [i64; 3])> = t.iter().map(|x| {
+        let boxes: Vec<[f64; 6]> = t.iter().map(|x| {
             let v = x.map(|i| p[i as usize]);
-            let a = cell([0, 1, 2].map(|k| v[0][k].min(v[1][k]).min(v[2][k])));
-            let b = cell([0, 1, 2].map(|k| v[0][k].max(v[1][k]).max(v[2][k])));
-            (a, b)
+            let mut b = [f64::MAX, f64::MAX, f64::MAX, f64::MIN, f64::MIN, f64::MIN];
+            for q in v { for k in 0..3 { b[k] = b[k].min(q[k]); b[k + 3] = b[k + 3].max(q[k]); } }
+            b
         }).collect();
-        let each = |bx: &([i64; 3], [i64; 3]), f: &mut dyn FnMut(usize)| {
-            for z in bx.0[2]..=bx.1[2] { for y in bx.0[1]..=bx.1[1] { for x in bx.0[0]..=bx.1[0] { f(idx([x, y, z])); } } }
-        };
-        for bx in &boxes { each(bx, &mut |c| cnt[c + 1] += 1); }
-        for i in 0..ncell { cnt[i + 1] += cnt[i]; }
-        let mut fill = cnt.clone();
-        let mut items = vec![0u32; cnt[ncell] as usize];
-        for (ti, bx) in boxes.iter().enumerate() { each(bx, &mut |c| { items[fill[c] as usize] = ti as u32; fill[c] += 1; }); }
-        Grid { p, t, lo, h, n, start: cnt, items }
+        let mut g = Grid { p, t, nodes: vec![], order: (0..t.len() as u32).collect() };
+        // node: box, then (first child, 0) for an inner node or (start, count | 1 << 31) for a leaf
+        let mut stack = vec![(0usize, t.len(), 0usize)];
+        g.nodes.push(([0.0; 6], 0, 0));
+        while let Some((lo, hi, ni)) = stack.pop() {
+            let mut bb = [f64::MAX, f64::MAX, f64::MAX, f64::MIN, f64::MIN, f64::MIN];
+            for &i in &g.order[lo..hi] { let b = &boxes[i as usize]; for k in 0..3 { bb[k] = bb[k].min(b[k]); bb[k + 3] = bb[k + 3].max(b[k + 3]); } }
+            if hi - lo <= LEAF { g.nodes[ni] = (bb, lo as u32, (hi - lo) as u32 | 1 << 31); continue; }
+            let ax = (0..3).max_by(|&i, &j| (bb[i + 3] - bb[i]).total_cmp(&(bb[j + 3] - bb[j]))).unwrap();
+            let mid = (lo + hi) / 2;
+            let c = |i: &u32| boxes[*i as usize][ax] + boxes[*i as usize][ax + 3];
+            g.order[lo..hi].select_nth_unstable_by(mid - lo, |a, b| c(a).total_cmp(&c(b)));
+            let first = g.nodes.len();
+            g.nodes.push(([0.0; 6], 0, 0));
+            g.nodes.push(([0.0; 6], 0, 0));
+            g.nodes[ni] = (bb, first as u32, 0);
+            stack.push((lo, mid, first));
+            stack.push((mid, hi, first + 1));
+        }
+        g
     }
     fn dist(&self, q: V) -> f64 {
-        let c = [0, 1, 2].map(|k| (((q[k] - self.lo[k]) / self.h).floor() as i64).clamp(0, self.n[k] - 1));
+        let bd = |b: &[f64; 6]| (0..3).map(|k| { let d = (b[k] - q[k]).max(q[k] - b[k + 3]).max(0.0); d * d }).sum::<f64>();
         let mut best = f64::MAX;
-        let maxr = self.n[0].max(self.n[1]).max(self.n[2]);
-        for r in 0..=maxr {
-            // every triangle in a cell at Chebyshev ring r is at least (r - 1) h away (q may lie outside the grid)
-            let off = [0, 1, 2].map(|k| (((q[k] - self.lo[k]) / self.h).floor() as i64 - c[k]).abs());
-            let gap = (r - 1 - off[0].max(off[1]).max(off[2])).max(0) as f64 * self.h;
-            if gap * gap >= best { break; }
-            for z in c[2] - r..=c[2] + r {
-                if z < 0 || z >= self.n[2] { continue; }
-                for y in c[1] - r..=c[1] + r {
-                    if y < 0 || y >= self.n[1] { continue; }
-                    for x in c[0] - r..=c[0] + r {
-                        if x < 0 || x >= self.n[0] { continue; }
-                        if (x - c[0]).abs() != r && (y - c[1]).abs() != r && (z - c[2]).abs() != r { continue; }
-                        let i = ((z * self.n[1] + y) * self.n[0] + x) as usize;
-                        for &ti in &self.items[self.start[i] as usize..self.start[i + 1] as usize] {
-                            let t = self.t[ti as usize];
-                            best = best.min(point_tri2(q, self.p[t[0] as usize], self.p[t[1] as usize], self.p[t[2] as usize]));
-                        }
-                    }
+        let mut stack = vec![(0u32, 0.0f64)];
+        while let Some((ni, d)) = stack.pop() {
+            if d >= best { continue; }
+            let (_, a, n) = self.nodes[ni as usize];
+            if n & 1 << 31 != 0 {
+                for &ti in &self.order[a as usize..(a + (n & !(1 << 31))) as usize] {
+                    let t = self.t[ti as usize];
+                    best = best.min(point_tri2(q, self.p[t[0] as usize], self.p[t[1] as usize], self.p[t[2] as usize]));
                 }
+                continue;
             }
+            let (d0, d1) = (bd(&self.nodes[a as usize].0), bd(&self.nodes[a as usize + 1].0));
+            // the nearer child is popped first
+            if d0 < d1 { stack.push((a + 1, d1)); stack.push((a, d0)); } else { stack.push((a, d0)); stack.push((a + 1, d1)); }
         }
         best.sqrt()
     }
