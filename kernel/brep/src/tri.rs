@@ -7,6 +7,12 @@ use crate::trim::P2;
 use std::cmp::Ordering;
 
 fn o2(a: P2, b: P2, c: P2) -> i8 { orient2d(a, b, c).0 }
+/// b lies on the line through a and c within an angle of 1e-9 rad seen from a (rounding of points sampled on a
+/// straight edge); such corners are not clipped as ears but inserted into the neighbouring triangles
+fn flat(a: P2, b: P2, c: P2) -> bool {
+    let (u, v) = ([b[0] - a[0], b[1] - a[1]], [c[0] - a[0], c[1] - a[1]]);
+    (u[0] * v[1] - u[1] * v[0]).abs() <= 1e-9 * u[0].hypot(u[1]) * v[0].hypot(v[1])
+}
 
 /// rings: counter-clockwise outer boundaries and clockwise holes (region on the left of every edge).
 /// Returns the points (ring points, consecutive repeats removed) and counter-clockwise triangles.
@@ -127,33 +133,44 @@ pub fn triangulate_src(rings: &[Vec<P2>]) -> (Vec<P2>, Vec<(usize, usize)>, Vec<
         let mut face = vec![];
         let mut h = h0;
         while !seen[h] { seen[h] = true; face.push(he[h].0); h = succ(h); }
-            monotone(&p, &face, &above, &mut tris);
-        }
+        monotone(&p, &face, &above, &mut tris);
+    }
     (p, src, tris)
 }
 
-/// ear clipping of a simple counter-clockwise polygon (a monotone piece: no holes, no bridges). A convex corner is
-/// an ear when no other vertex lies in its triangle or on its new diagonal; collinear corners are dropped.
+/// ear clipping of a simple counter-clockwise polygon (a monotone piece: no holes, no bridges). A corner is an ear
+/// when it turns left and no other vertex lies in its triangle or on (or within the `flat` tolerance of) its closing
+/// diagonal. Flat corners (points sampled along a straight edge) are cut off only when nothing else is left (a
+/// sliver piece along a diagonal), so each stays until a proper triangle uses it: every ring point is a mesh vertex
+/// and no T-junction arises.
 fn monotone(p: &[P2], face: &[usize], _above: &dyn Fn(usize, usize) -> bool, tris: &mut Vec<[usize; 3]>) {
     let mut v: Vec<usize> = face.to_vec();
-    let (mut i, mut misses) = (0usize, 0usize);
+    let (mut i, mut misses, mut slivers) = (0usize, 0usize, false);
     while v.len() > 3 {
         let n = v.len();
         i %= n;
         let (a, b, c) = (v[(i + n - 1) % n], v[i], v[(i + 1) % n]);
-        let turn = o2(p[a], p[b], p[c]);
-        let ear = turn > 0 && v.iter().all(|&q| q == a || q == b || q == c || p[q] == p[a] || p[q] == p[b] || p[q] == p[c]
-            || !(o2(p[a], p[b], p[q]) > 0 && o2(p[b], p[c], p[q]) > 0 && o2(p[c], p[a], p[q]) >= 0));
-        if ear || (turn == 0 && misses > n) {
-            if ear { tris.push([a, b, c]); }
+        let ear = o2(p[a], p[b], p[c]) > 0 && (slivers || !flat(p[a], p[b], p[c])) && v.iter().all(|&q| q == a || q == b || q == c || p[q] == p[a] || p[q] == p[b] || p[q] == p[c]
+            || !((o2(p[a], p[b], p[q]) > 0 && o2(p[b], p[c], p[q]) > 0 && o2(p[c], p[a], p[q]) >= 0) || (!slivers && on_seg(p[q], p[c], p[a]))));
+        if ear {
+            tris.push([a, b, c]);
             v.remove(i);
-            misses = 0;
+            (misses, slivers) = (0, false);
             i = i.saturating_sub(1);
         } else {
             i += 1;
             misses += 1;
-            if misses > 2 * n { break; }
+            if misses > n {
+                // no proper ear: only flat corners left; then exact ears, then nothing (zero area)
+                if slivers { break; }
+                (misses, slivers) = (0, true);
+            }
         }
     }
     if v.len() == 3 && o2(p[v[0]], p[v[1]], p[v[2]]) > 0 { tris.push([v[0], v[1], v[2]]); }
+}
+
+/// q on segment ab, exactly or within the `flat` tolerance, strictly between its ends
+fn on_seg(q: P2, a: P2, b: P2) -> bool {
+    q != a && q != b && (o2(a, b, q) == 0 || flat(a, q, b)) && (q[0] - a[0]) * (q[0] - b[0]) + (q[1] - a[1]) * (q[1] - b[1]) < 0.0
 }

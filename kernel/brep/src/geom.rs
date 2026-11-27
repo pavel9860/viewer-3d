@@ -19,6 +19,8 @@ pub trait Surf: Send + Sync {
     fn dom(&self) -> [f64; 4];
     fn per_u(&self) -> bool { false }
     fn per_v(&self) -> bool { false }
+    /// parameter periods in u and v (0: not periodic); a point repeats at every multiple
+    fn periods(&self) -> [f64; 2] { [0.0, 0.0] }
     /// v-range ends are parametric poles (degenerate points), not edges: crossing one continues on the other side
     fn poles_v(&self) -> bool { false }
     /// unsigned distance from the implicit equation (analytic surfaces only)

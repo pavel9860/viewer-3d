@@ -54,6 +54,33 @@ pub fn open_causes(m: &Mesh) -> OpenCauses {
     c
 }
 
+/// `q` within the domain `d` up to 1e-3 of its width
+fn inside(q: P2, d: [f64; 4]) -> bool {
+    let (mu, mv) = (1e-3 * (d[1] - d[0]), 1e-3 * (d[3] - d[2]));
+    q[0] >= d[0] - mu && q[0] <= d[1] + mu && q[1] >= d[2] - mv && q[1] <= d[3] + mv
+}
+
+/// largest distance between the end points of the two coedges of an edge (each evaluated through its p-curve and
+/// surface), per pair of (surface kind, p-curve kind) of the two coedges: (edges, largest gap)
+pub fn edge_gaps(m: &Model) -> std::collections::BTreeMap<[(u32, u32); 2], (usize, f64)> {
+    let mut by_edge: HashMap<usize, Vec<usize>> = HashMap::new();
+    for f in &m.faces { for l in &f.loops { for c in l.clone() { by_edge.entry(m.coedges[c].edge).or_default().push(c); } } }
+    let face_of: HashMap<usize, usize> = m.faces.iter().flat_map(|f| f.loops.iter().flat_map(|l| l.clone()).map(move |c| (c, f.surface))).collect();
+    let mut out = std::collections::BTreeMap::new();
+    for cs in by_edge.values().filter(|cs| cs.len() == 2) {
+        let ends = |c: usize| { let ce = &m.coedges[c]; [m.point(ce, ce.t[0]), m.point(ce, ce.t[1])] };
+        let (a, b) = (ends(cs[0]), ends(cs[1]));
+        let d = |x: V, y: V| norm(sub(x, y));
+        let gap = d(a[0], b[0]).max(d(a[1], b[1])).min(d(a[0], b[1]).max(d(a[1], b[0])));
+        let kind = |c: usize| (m.surface_kinds[face_of[&c]], m.pcurve_kinds[m.coedges[c].pcurve]);
+        let (x, y) = (kind(cs[0]), kind(cs[1]));
+        let e: &mut (usize, f64) = out.entry([x.min(y), x.max(y)]).or_default();
+        e.0 += 1;
+        e.1 = e.1.max(gap);
+    }
+    out
+}
+
 /// closure and size measures of a mesh
 #[derive(Debug, Default)]
 pub struct Stats { pub tris: usize, pub area: f64, pub volume: f64, pub open_edges: usize, pub nonmanifold_edges: usize, pub bbox: [f64; 6] }
@@ -139,12 +166,62 @@ pub fn tessellate(m: &Model, sag: f64, shells: &[usize]) -> Mesh {
     let mut seen = vec![false; m.faces.len()];
     let faces: Vec<(usize, i32)> = shells.iter().flat_map(|&i| m.shells[i].faces.iter().copied()).filter(|&(f, _)| !std::mem::replace(&mut seen[f], true)).collect();
     let coedges: Vec<usize> = faces.iter().flat_map(|&(f, _)| m.faces[f].loops.iter().flat_map(|l| l.clone())).collect();
-    for c in coedges {
+    // each edge is sampled along its first coedge whose p-curve stays in its surface's domain (ends and middle)
+    let surf_of: HashMap<usize, usize> = faces.iter().flat_map(|&(f, _)| m.faces[f].loops.iter().flat_map(|l| l.clone()).map(move |c| (c, m.faces[f].surface))).collect();
+    let in_dom = |c: usize| {
         let ce = &m.coedges[c];
-        *out.edge_uses.entry(ce.edge).or_default() += 1;
-        if edges.contains_key(&ce.edge) { continue; }
-        let f = sample(|t| m.point(ce, t), ce.t[0], ce.t[1], sag);
-        let ends = m.edges[ce.edge];
+        if m.bad_pcurve[ce.pcurve].is_some() || m.bad_surface[surf_of[&c]].is_some() { return false; }
+        let d = m.surfaces[surf_of[&c]].dom();
+        let pc = &m.pcurves[ce.pcurve].1;
+        [ce.t[0], (ce.t[0] + ce.t[1]) / 2.0, ce.t[1]].iter().all(|&t| inside(pc.uv(t), d))
+    };
+    let mut along: HashMap<usize, usize> = HashMap::new();
+    for &c in &coedges {
+        let e = m.coedges[c].edge;
+        match along.get(&e) { Some(&k) if in_dom(k) || !in_dom(c) => {} _ => { along.insert(e, c); } }
+    }
+    // edge samples as fractions of the sampling coedge's range; refined where a face's UV rings cross
+    let mut fr: HashMap<usize, Vec<f64>> = HashMap::new();
+    for &c in &coedges {
+        *out.edge_uses.entry(m.coedges[c].edge).or_default() += 1;
+        let ce = &m.coedges[along[&m.coedges[c].edge]];
+        fr.entry(ce.edge).or_insert_with(|| sample(|t| m.point(ce, t), ce.t[0], ce.t[1], sag));
+    }
+    let cap: HashMap<usize, usize> = fr.iter().map(|(&e, f)| (e, 4 * f.len() + 64)).collect();
+    let valid = |fi: usize| { let f = &m.faces[fi]; m.bad_surface[f.surface].is_none() && f.loops.iter().flat_map(|l| l.clone()).all(|c| m.bad_pcurve[m.coedges[c].pcurve].is_none()) };
+    // a face keeps refining only while its crossings decrease (crossings of the curves themselves, i.e. bad loops,
+    // do not go away)
+    let mut last: HashMap<usize, usize> = HashMap::new();
+    for _round in 0..10 {
+        let mut split: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &(fi, _) in &faces {
+            if !valid(fi) || last.get(&fi) == Some(&0) { continue; }
+            let Ok(rings) = face_rings(m, fi, &fr, &along) else { continue };
+            let x = crossing_segments(&rings);
+            let before = last.insert(fi, x.len());
+            if x.is_empty() || before.is_some_and(|b| x.len() >= b) { last.insert(fi, 0); continue; }
+            for (e, k) in x { split.entry(e).or_default().push(k); }
+        }
+        if split.is_empty() { break; }
+        let mut grew = false;
+        for (e, mut ks) in split {
+            ks.sort_unstable();
+            ks.dedup();
+            let f = fr.get_mut(&e).unwrap();
+            // loops that really cross (bad input) cannot be cured by sampling: at most 4x the initial samples + 64
+            if f.len() + ks.len() > cap[&e] { continue; }
+            grew = true;
+            for &k in ks.iter().rev() { let x = 0.5 * (f[k] + f[k + 1]); f.insert(k + 1, x); }
+        }
+        if !grew { break; }
+    }
+    // mesh points: one per sample, shared by every face using the edge; vertices shared across edges
+    let mut keys: Vec<usize> = fr.keys().copied().collect();
+    keys.sort_unstable();
+    for e in keys {
+        let f = fr.remove(&e).unwrap();
+        let ce = &m.coedges[along[&e]];
+        let ends = m.edges[e];
         let mut idx = Vec::with_capacity(f.len());
         for (k, &x) in f.iter().enumerate() {
             let at_end = if k == 0 { Some(ends[0]) } else if k + 1 == f.len() { Some(ends[1]) } else { None };
@@ -154,35 +231,39 @@ pub fn tessellate(m: &Model, sag: f64, shells: &[usize]) -> Mesh {
                 None => new(&mut out),
             });
         }
-        out.edge_pts.push((ce.edge, idx.clone()));
-        edges.insert(ce.edge, EdgeSamples { f, idx });
+        out.edge_pts.push((e, idx.clone()));
+        edges.insert(e, EdgeSamples { f, idx });
     }
+    let fr: HashMap<usize, Vec<f64>> = edges.iter().map(|(&e, es)| (e, es.f.clone())).collect();
     for &(fi, shell_sense) in &faces {
         let face = &m.faces[fi];
+        if let Some(why) = &m.bad_surface[face.surface] { out.failed.push((face.id, format!("surface kind {}: {why}", m.surface_kinds[face.surface]))); continue; }
+        if let Some(c) = face.loops.iter().flat_map(|l| l.clone()).find(|&c| m.bad_pcurve[m.coedges[c].pcurve].is_some()) {
+            let pc = m.coedges[c].pcurve;
+            out.failed.push((face.id, format!("p-curve kind {}: {}", m.pcurve_kinds[pc], m.bad_pcurve[pc].as_ref().unwrap())));
+            continue;
+        }
         let s = m.surfaces[face.surface].as_ref();
         // UV rings with their mesh point indices
-        let mut rings: Vec<(Vec<P2>, Vec<u32>)> = vec![];
-        let mut bad_loop = false;
-        let mut dirs = vec![];
-        for l in &face.loops {
-            let Some(dir) = loop_direction(m, l.clone()) else { bad_loop = true; break };
-            dirs.push(dir);
-            let (mut uv, mut ix) = (vec![], vec![]);
-            for c in l.clone() {
-                let ce = &m.coedges[c];
-                let es = &edges[&ce.edge];
-                let pc = &m.pcurves[ce.pcurve].1;
-                let n = es.f.len();
-                let order: Vec<usize> = if ce.sense * dir > 0 { (0..n - 1).collect() } else { (1..n).rev().collect() };
-                for k in order {
-                    uv.push(pc.uv(ce.t[0] + es.f[k] * (ce.t[1] - ce.t[0])));
-                    ix.push(es.idx[k]);
-                }
+        let (mut rings, dirs) = match face_rings(m, fi, &fr, &along) {
+            Ok(r) => {
+                let dirs: Vec<i32> = r.iter().map(|x| x.2).collect();
+                (r.into_iter().filter(|x| x.0.len() >= 3).map(|(uv, refs, _)| (uv, refs.iter().map(|&(e, k, _)| edges[&e].idx[k]).collect::<Vec<u32>>())).collect::<Vec<_>>(), dirs)
             }
-            if uv.len() >= 3 { rings.push((uv, ix)); }
+            Err(why) => { out.failed.push((face.id, why)); continue; }
+        };
+
+        // boundary within the surface's parameter domain (surfaces with finite data: knots, profile ranges), with
+        // a margin of 1e-3 of its width
+        let d = s.dom();
+        if let Some(q) = rings.iter().flat_map(|r| &r.0).find(|&&q| !inside(q, d)) {
+            out.failed.push((face.id, format!("boundary point ({:.6}, {:.6}) outside the surface domain {d:?}", q[0], q[1])));
+            continue;
         }
-        if bad_loop { out.failed.push((face.id, "loop does not chain in either direction".into())); continue; }
         if rings.is_empty() { out.failed.push((face.id, "no loop with 3 points".into())); continue; }
+        // the face's own p-curves must put its boundary on the shared edge points (within the chord tolerance)
+        let off = rings.iter().flat_map(|r| r.0.iter().zip(&r.1)).map(|(q, &i)| norm(sub(s.ev(q[0], q[1]).p, out.p[i as usize]))).fold(0.0, f64::max);
+        if off > sag { out.failed.push((face.id, format!("boundary {off:.3e} off the shared edge points (p-curves disagree with the neighbouring faces)"))); continue; }
         // outer loop: largest area, counter-clockwise; the others clockwise
         let outer = (0..rings.len()).max_by(|&a, &b| area(&rings[a].0).abs().total_cmp(&area(&rings[b].0).abs())).unwrap();
         let chained = if area(&rings[outer].0) > 0.0 { 1 } else { -1 };
@@ -190,13 +271,24 @@ pub fn tessellate(m: &Model, sag: f64, shells: &[usize]) -> Mesh {
             let a = area(&r.0);
             if (i == outer) != (a > 0.0) { r.0.reverse(); r.1.reverse(); }
         }
-        let holes: Vec<Vec<P2>> = rings.iter().enumerate().filter(|&(i, _)| i != outer).map(|(_, r)| r.0.clone()).collect();
-        let (pts, tris) = triangulate(&rings[outer].0, &holes);
-        let mut index: Vec<u32> = rings[outer].1.clone();
-        for (i, r) in rings.iter().enumerate() { if i != outer { index.extend_from_slice(&r.1); } }
+        // outer ring first, then the holes
+        rings.swap(0, outer);
+        let uv_rings: Vec<Vec<P2>> = rings.iter().map(|r| r.0.clone()).collect();
+        let (pts, src, tris) = crate::tri::triangulate_src(&uv_rings);
+        let mut index: Vec<u32> = src.iter().map(|&(r, k)| rings[r].1[k]).collect();
+        let target = area(&rings[0].0).abs() - rings[1..].iter().map(|h| area(&h.0).abs()).sum::<f64>();
         let got: f64 = tris.iter().map(|t| area(&[pts[t[0]], pts[t[1]], pts[t[2]]]).abs()).sum();
-        let target = area(&rings[outer].0).abs() - holes.iter().map(|h| area(h).abs()).sum::<f64>();
-        if (got - target).abs() > 1e-6 * target.max(1e-300) { out.failed.push((face.id, format!("ear clipping covered {got:.6e} of {target:.6e} (UV area)"))); }
+        if (got - target).abs() > 1e-6 * target.max(1e-300) { out.failed.push((face.id, format!("triangulation covered {got:.6e} of {target:.6e} (UV area)"))); }
+        // every ring segment between distinct points must be a triangle edge
+        let mut tedges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        for t in &tris { for k in 0..3 { let (x, y) = (index[t[k]], index[t[(k + 1) % 3]]); tedges.insert((x.min(y), x.max(y))); } }
+        let lost = rings.iter().flat_map(|r| (0..r.1.len()).map(move |k| (r.1[k], r.1[(k + 1) % r.1.len()]))).filter(|&(x, y)| x != y && out.p[x as usize] != out.p[y as usize] && !tedges.contains(&(x.min(y), x.max(y)))).count();
+        // BREP_FACE=ID: the face's UV rings and triangles
+        if std::env::var("BREP_FACE").ok().and_then(|x| x.parse::<u32>().ok()) == Some(face.id) {
+            for (ri, r) in rings.iter().enumerate() { for (k, q) in r.0.iter().enumerate() { eprintln!("ring {ri} {k} idx {} uv {:?} {:?}", r.1[k], q[0], q[1]); } }
+            for t in &tris { eprintln!("tri {:?} idx {:?}", t, t.map(|i| index[i])); }
+        }
+        if lost > 0 { out.failed.push((face.id, format!("{lost} boundary segments are not triangle edges"))); }
         let mut uvs = pts;
         let mut tri: Vec<[usize; 3]> = tris;
         refine(s, &mut uvs, &mut tri, &mut index, &mut out.p, sag);
@@ -214,54 +306,95 @@ pub fn tessellate(m: &Model, sag: f64, shells: &[usize]) -> Mesh {
     out
 }
 
-fn o2(a: P2, b: P2, c: P2) -> i8 { orient2d(a, b, c).0 }
-fn crosses(a: P2, b: P2, c: P2, d: P2) -> bool { o2(a, b, c) * o2(a, b, d) < 0 && o2(c, d, a) * o2(c, d, b) < 0 }
 
-/// ear clipping of a counter-clockwise polygon with clockwise holes (each bridged to a visible
-/// vertex). Every input point ends up in a triangle: collinear points, which a shared edge's
-/// neighbour face also uses, are cut off as zero-area ears once no proper ear is left.
-fn triangulate(outer: &[P2], holes: &[Vec<P2>]) -> (Vec<P2>, Vec<[usize; 3]>) {
-    let mut pts: Vec<P2> = outer.to_vec();
-    let mut poly: Vec<usize> = (0..pts.len()).collect();
-    let mut hs: Vec<Vec<usize>> = holes.iter().map(|h| { let s = pts.len(); pts.extend_from_slice(h); (s..pts.len()).collect() }).collect();
-    let maxx = |h: &Vec<usize>, pts: &[P2]| h.iter().map(|&i| pts[i][0]).fold(f64::MIN, f64::max);
-    hs.sort_by(|a, b| maxx(b, &pts).total_cmp(&maxx(a, &pts)));
-    for h in hs {
-        let hi = (0..h.len()).max_by(|&a, &b| pts[h[a]][0].total_cmp(&pts[h[b]][0])).unwrap();
-        let hp = pts[h[hi]];
-        let clear = |q: P2, ring: &[usize]| (0..ring.len()).all(|k| { let (a, b) = (pts[ring[k]], pts[ring[(k + 1) % ring.len()]]); !crosses(hp, q, a, b) });
-        let d2 = |j: usize| { let q = pts[poly[j]]; (q[0] - hp[0]).powi(2) + (q[1] - hp[1]).powi(2) };
-        let mut order: Vec<usize> = (0..poly.len()).collect();
-        order.sort_by(|&a, &b| d2(a).total_cmp(&d2(b)));
-        let j = order.iter().copied().find(|&j| clear(pts[poly[j]], &poly) && clear(pts[poly[j]], &h)).unwrap_or(order[0]);
-        let mut np = poly[..=j].to_vec();
-        np.extend((0..=h.len()).map(|k| h[(hi + k) % h.len()]));
-        np.extend_from_slice(&poly[j..]);
-        poly = np;
+/// UV rings of a face from edge sample fractions `fr`, each point with its (edge, sample index, interval of the
+/// segment starting there), and the loop direction. On a periodic surface each coedge is shifted by whole periods to start where the previous one ended.
+fn face_rings(m: &Model, fi: usize, fr: &HashMap<usize, Vec<f64>>, along: &HashMap<usize, usize>) -> Result<Vec<(Vec<P2>, Vec<(usize, usize, usize)>, i32)>, String> {
+    let face = &m.faces[fi];
+    let per = m.surfaces[face.surface].periods();
+    let mut rings = vec![];
+    for l in &face.loops {
+        let dir = loop_direction(m, l.clone()).ok_or("loop does not chain in either direction")?;
+        let (mut uv, mut refs) = (vec![], vec![]);
+        let mut last: Option<P2> = None;
+        for c in l.clone() {
+            let ce = &m.coedges[c];
+            let f = &fr[&ce.edge];
+            let pc = &m.pcurves[ce.pcurve].1;
+            let n = f.len();
+            let order: Vec<usize> = if ce.sense * dir > 0 { (0..n).collect() } else { (0..n).rev().collect() };
+            // parameters on this coedge of the edge's sample points: the sampling coedge's own, else the projection
+            // of the sample onto this coedge (coedges of one edge need not share a parametrization)
+            let a = &m.coedges[along[&ce.edge]];
+            let t_of = |x: f64| -> f64 {
+                let t0 = ce.t[0] + x * (ce.t[1] - ce.t[0]);
+                if along[&ce.edge] == c { return t0; }
+                let target = m.point(a, a.t[0] + x * (a.t[1] - a.t[0]));
+                let (mut t, h) = (t0, 1e-7 * (ce.t[1] - ce.t[0]).abs().max(1e-12));
+                for _ in 0..8 {
+                    let q = m.point(ce, t);
+                    let d = mulv(sub(m.point(ce, t + h), m.point(ce, t - h)), 0.5 / h);
+                    let dd = dot(d, d);
+                    if dd <= 0.0 { break; }
+                    let step = dot(sub(q, target), d) / dd;
+                    t -= step;
+                    if step.abs() <= 1e-12 * (ce.t[1] - ce.t[0]).abs() { break; }
+                }
+                t
+            };
+            let mut pts: Vec<P2> = order.iter().map(|&k| pc.uv(if k == 0 { ce.t[0] } else if k + 1 == n { ce.t[1] } else { t_of(f[k]) })).collect();
+            if let Some(e) = last {
+                for a in 0..2 {
+                    if per[a] <= 0.0 { continue; }
+                    let k = ((e[a] - pts[0][a]) / per[a]).round();
+                    if k != 0.0 { for q in pts.iter_mut() { q[a] += k * per[a]; } }
+                }
+            }
+            last = pts.last().copied();
+            for (j, &k) in order.iter().enumerate().take(n - 1) { uv.push(pts[j]); refs.push((ce.edge, k, k.min(order[j + 1]))); }
+        }
+        rings.push((uv, refs, dir));
     }
-    let mut tris = vec![];
-    let (mut v, mut i, mut misses) = (poly, 0usize, 0usize);
-    let mut flat_ok = false;
-    while v.len() > 3 {
-        let n = v.len();
-        i %= n;
-        let (a, b, c) = (v[(i + n - 1) % n], v[i], v[(i + 1) % n]);
-        let turn = o2(pts[a], pts[b], pts[c]);
-        let ear = (turn > 0 || (flat_ok && turn == 0)) && (0..n).all(|k| {
-            let q = v[k];
-            if q == a || q == b || q == c || pts[q] == pts[a] || pts[q] == pts[b] || pts[q] == pts[c] { return true; }
-            if o2(pts[v[(k + n - 1) % n]], pts[q], pts[v[(k + 1) % n]]) > 0 { return true; }
-            !(o2(pts[a], pts[b], pts[q]) >= 0 && o2(pts[b], pts[c], pts[q]) >= 0 && o2(pts[c], pts[a], pts[q]) >= 0)
-        });
-        if ear { tris.push([a, b, c]); v.remove(i); misses = 0; flat_ok = false; i = i.saturating_sub(1); }
-        else {
-            i += 1;
-            misses += 1;
-            if misses > n { if flat_ok { break; } flat_ok = true; misses = 0; }
+    // a vertex met again in the face (a hole touching another loop) takes its first UV when the two agree within
+    // rounding (1e-9 of the face's UV extent); seam copies a period apart stay
+    let mut ext = 0.0f64;
+    for (uv, _, _) in &rings { for q in uv { ext = ext.max(q[0].abs()).max(q[1].abs()); } }
+    let mut first: HashMap<usize, P2> = HashMap::new();
+    for (uv, refs, _) in rings.iter_mut() {
+        for (q, &(e, k, _)) in uv.iter_mut().zip(refs.iter()) {
+            let n = fr[&e].len();
+            let v = if k == 0 { m.edges[e][0] } else if k + 1 == n { m.edges[e][1] } else { continue };
+            match first.get(&v) {
+                Some(f) if (f[0] - q[0]).hypot(f[1] - q[1]) <= 1e-9 * ext.max(1.0) => *q = *f,
+                Some(_) => {}
+                None => { first.insert(v, *q); }
+            }
         }
     }
-    if v.len() == 3 { tris.push([v[0], v[1], v[2]]); }
-    (pts, tris)
+    Ok(rings)
+}
+
+/// ring segments that properly cross another ring segment (sampling too coarse where loops come close, e.g. a
+/// hole tangent to the outer loop), as (edge, sample interval) to bisect
+fn crossing_segments(rings: &[(Vec<P2>, Vec<(usize, usize, usize)>, i32)]) -> Vec<(usize, usize)> {
+    // segments (a, b, (edge, interval))
+    let mut seg: Vec<(P2, P2, (usize, usize))> = vec![];
+    for (uv, refs, _) in rings { for k in 0..uv.len() { seg.push((uv[k], uv[(k + 1) % uv.len()], (refs[k].0, refs[k].2))); } }
+    let mut order: Vec<usize> = (0..seg.len()).collect();
+    let lo = |i: usize| seg[i].0[0].min(seg[i].1[0]);
+    let hi = |i: usize| seg[i].0[0].max(seg[i].1[0]);
+    order.sort_by(|&a, &b| lo(a).total_cmp(&lo(b)));
+    let o2 = |a: P2, b: P2, c: P2| orient2d(a, b, c).0;
+    let mut out = vec![];
+    for (x, &i) in order.iter().enumerate() {
+        for &j in &order[x + 1..] {
+            if lo(j) > hi(i) { break; }
+            let ((a, b, ri), (c, d, rj)) = (seg[i], seg[j]);
+            if a == c || a == d || b == c || b == d { continue; }
+            if o2(a, b, c) * o2(a, b, d) < 0 && o2(c, d, a) * o2(c, d, b) < 0 { out.push(ri); out.push(rj); }
+        }
+    }
+    out
 }
 
 /// +1 when the loop's coedges chain end to start with their stored senses, -1 when they chain with all

@@ -1,7 +1,7 @@
 //! B-rep kernel core.
 
 /// diagnostics switch: BREP_DEBUG unset = off; empty, "1" or "all" = every topic; else a comma list of topics
-/// (check, bool, time, mesh, tess, sew, orient, open, tri)
+/// (check, bool, time, mesh, tess, sew, orient, open, nonman, gaps, faces, tri)
 pub fn debug(topic: &str) -> bool {
     match std::env::var("BREP_DEBUG") {
         Err(_) => false,
