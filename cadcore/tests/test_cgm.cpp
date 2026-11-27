@@ -161,7 +161,7 @@ void kind_part(const KindPart& pt, bool surface, std::uint32_t kind, const std::
     CHECK((pt.count ? n == pt.count : n > 0));
 }
 
-TEST_CASE("CGM surfaces: fillets (216), revolutions (211), ruled (243, 251)") {
+TEST_CASE("CGM surfaces: fillets (216), revolutions (211), ruled (243, 251), extrusions of 3D curves (210)") {
     const char* g = "caa/caadoc/CAAElecHarnessItf.edu/CNext/resources/graphic/";
     const std::string plug = std::string(g) + "CAA_EhiFLEXComputeBundleSegment_Sample/plug.CATPart";
     const std::string dryer = std::string(g) + "CAA_EHIMultiSegmentSample/hair-dryer.CATPart";
@@ -189,6 +189,18 @@ TEST_CASE("CGM surfaces: fillets (216), revolutions (211), ruled (243, 251)") {
                                   KindPart{"local/04190b04", 717, 716},
                                   KindPart{"caa/caadoc/Doc/online/CAAScdStrUseCases/samples/EditCutout/Plate_0053.CATPart", 20, 20}})
         kind_part(pt, true, cgm::SurfRuled, ruled);
+    // extrusion of a 3D curve: d, then a profile of form 2 (line) or 3 (B-spline: degree nk knots np rational poles)
+    kind_part({"local/5fdf6e0d", 18, 15, 4}, true, cgm::SurfExtrusionCurve, [](const cgm::Ir& ir, std::size_t i) {
+        const auto& p = ir.surfaces[i].p;
+        REQUIRE(p.size() > 4);
+        CHECK(p[0] * p[0] + p[1] * p[1] + p[2] * p[2] > 0);
+        CHECK((p[3] == 2 || p[3] == 3));
+        if (p[3] == 3) {
+            const std::size_t deg = std::size_t(p[4]), nk = std::size_t(p[5]), np = std::size_t(p[6 + nk]);
+            CHECK(nk == np + deg + 1);
+            CHECK(p.size() == 8 + nk + 3 * np + (p[7 + nk] != 0 ? np : 0));
+        }
+    });
 }
 
 TEST_CASE("CGM p-curves: B-splines (170), expressions (155)") {

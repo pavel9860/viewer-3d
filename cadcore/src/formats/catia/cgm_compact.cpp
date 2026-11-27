@@ -655,9 +655,7 @@ std::vector<CanonicalRecord> canonical_records(const Stream& s, const CompactLay
                 const Record& r = recs[i];
                 if (r.type != 210 || !out[i].error.empty() || out[i].c.refs.empty() || out[i].c.payload.size() < 40 || cx.box.count(r.id)) continue;
                 std::uint32_t prof = out[i].c.refs[0];
-                if (auto t = cx.type.find(prof); t != cx.type.end() && is_edge_curve(t->second))
-                    for (std::size_t m = 0; m < recs.size(); ++m)
-                        if (recs[m].id == prof && out[m].error.empty() && !out[m].c.refs.empty()) prof = out[m].c.refs[0];
+                if (auto f = cx.first.find(prof); f != cx.first.end()) prof = f->second;  // an edge curve: its first curve
                 auto rg = cx.range.find(prof);
                 if (rg == cx.range.end()) continue;
                 const std::uint8_t* q = out[i].c.payload.data();

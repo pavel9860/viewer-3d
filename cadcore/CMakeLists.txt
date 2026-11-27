@@ -83,7 +83,7 @@ if(CADCORE_TESTS AND NOT EMSCRIPTEN)
   target_link_libraries(cadcli PRIVATE cadcore cadcore_testgen)
   target_include_directories(cadcli PRIVATE src)  # debug commands read internal CATIA structures
 
-  add_executable(cadcore_tests tests/test_main.cpp tests/test_generated.cpp tests/test_robustness.cpp tests/test_codecs.cpp tests/test_draco.cpp tests/test_catproduct.cpp tests/test_threedxml.cpp tests/test_cgr.cpp tests/test_catia_grammar.cpp tests/test_dxf.cpp tests/test_cgm.cpp tests/assembly_gt.cpp)
+  add_executable(cadcore_tests tests/test_main.cpp tests/test_generated.cpp tests/test_robustness.cpp tests/test_codecs.cpp tests/test_draco.cpp tests/test_catproduct.cpp tests/test_threedxml.cpp tests/test_cgr.cpp tests/test_catia_grammar.cpp tests/test_dxf.cpp tests/test_cgm.cpp tests/test_cgm_compact.cpp tests/assembly_gt.cpp)
   target_include_directories(cadcore_tests PRIVATE src)
   set(CADCORE_CATIA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../samples/catia" CACHE PATH "Folder with the CATIA ground-truth projects (CATProduct + STEP exports)")
   target_compile_definitions(cadcore_tests PRIVATE CADCORE_SAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../samples"
@@ -94,6 +94,7 @@ if(CADCORE_TESTS AND NOT EMSCRIPTEN)
   # Speed / complexity (separate: timing-based, run on a quiet machine).
   add_executable(cadcore_perf tests/test_main.cpp tests/perf.cpp)
   target_include_directories(cadcore_perf PRIVATE src)
+  target_compile_definitions(cadcore_perf PRIVATE CADCORE_SAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../samples")
   target_link_libraries(cadcore_perf PRIVATE cadcore cadcore_testgen)
   target_compile_options(cadcore_perf PRIVATE ${CADCORE_WARNINGS})
 

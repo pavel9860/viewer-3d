@@ -13,12 +13,17 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "cadcore/decode.hpp"
 #include "cadcore/stats.hpp"
+#include "formats/catia/cgm.hpp"
+#include "formats/catia/cgm_model.hpp"
 #include "harness.hpp"
 #include "testgen/testgen.hpp"
 
@@ -144,3 +149,49 @@ void run_family(const Family& fam) {
 TEST_CASE("decode time grows linearly: long strips") { run_family({"strips", strips, false}); }
 TEST_CASE("decode time grows linearly: one face per quad") { run_family({"quads", quads, false}); }
 TEST_CASE("decode time grows linearly: many instances") { run_family({"nodes", nodes, true}); }
+
+// CATIA CGM B-rep decode (stream location, framing, compact transcoding, B-rep) on corpus parts of one
+// family (2014Fall / 2015Fall) whose record counts span two orders of magnitude; skipped without the
+// samples. Floor: a quarter of the records/s measured on 2026-11-27 (release).
+TEST_CASE("CGM decode time grows linearly with records") {
+    namespace cgm = cadcore::formats::catia::cgm;
+    namespace fs = std::filesystem;
+    const char* parts[] = {
+        "local/35f43d31",          // ~1.3k records
+        "local/fef20ee6",         // ~5.3k
+        "local/20305860",          // ~17k
+        "local/d9dcb20f",   // ~53k
+        "local/c9c67ea4",                // ~134k
+        "local/437f4318",                 // ~225k
+    };
+    std::vector<Timing> ts;
+    for (const char* rel : parts) {
+        const fs::path p = fs::path(CADCORE_SAMPLES_DIR) / rel;
+        if (!fs::exists(p)) return;
+        std::ifstream f(p, std::ios::binary);
+        const std::vector<std::uint8_t> file{std::istreambuf_iterator<char>(f), {}};
+        Timing t;
+        double total = 0;
+        t.seconds = 1e30;
+        for (int rep = 0; rep < 15 && (rep < 3 || total < 0.3); ++rep) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+            REQUIRE(st.has_value());
+            const cgm::Stream s = cgm::frame(ByteView(st->data(), st->size()));
+            const cgm::Ir ir = cgm::decode(s);
+            const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            t.bytes = s.records.size();  // the exponent's size: records
+            t.triangles = ir.faces.size();
+            REQUIRE(!ir.faces.empty());
+            t.seconds = std::min(t.seconds, dt);
+            total += dt;
+        }
+        ts.push_back(t);
+    }
+    const double e = exponent(ts), rate = double(ts.back().bytes) / ts.back().seconds;
+    CAPTURE(e);
+    CAPTURE(rate);
+    std::printf("  cgm      2014-15 corpus        exponent %.2f   %8.2f ms  %8.0f records/s  %9zu faces\n", e, ts.back().seconds * 1e3, rate, ts.back().triangles);
+    CHECK(e <= kMaxExponent);
+    if (!kSanitized) CHECK(rate >= 250e3);
+}
