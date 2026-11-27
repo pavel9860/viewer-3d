@@ -700,10 +700,27 @@ static int cmd_streams(int argc, char** argv) {
 
 // cgm FILE [OUT.cgmir]: the CGMGeom stream's dialect, records, decoded B-rep and left-out faces;
 // writes the flat IR when OUT is given.
+// JSON string contents: quotes and backslashes become single quotes.
+static std::string json_text(std::string s) {
+    for (char& c : s) if (c == '"' || c == '\\') c = '\'';
+    return s;
+}
+static void print_hex(ByteView b) {
+    static const char* hex = "0123456789abcdef";
+    for (std::size_t j = 0; j < b.size; ++j) std::printf("%c%c", hex[b[j] >> 4], hex[b[j] & 15]);
+}
+
+// cgm CATPART [OUT.cgmir] [--pending]: decode summary as one JSON line; the IR to OUT.
 static int cmd_cgm(int argc, char** argv) {
     if (argc < 3) return 2;
     auto bytes = read_file(argv[2]);
     namespace cgm = formats::catia::cgm;
+    cgm::DecodeOptions opt;
+    const char* out = nullptr;
+    for (int a = 3; a < argc; ++a) {
+        if (std::string(argv[a]) == "--pending") opt.pending_kinds = true;
+        else out = argv[a];
+    }
     try {
         const auto st = cgm::find_stream(ByteView(bytes.data(), bytes.size()));
         if (!st) { std::printf("{\"file\":\"%s\",\"cgm\":false}\n", argv[2]); return 0; }
@@ -711,40 +728,33 @@ static int cmd_cgm(int argc, char** argv) {
         std::vector<std::vector<std::uint32_t>> shown;
         std::string shown_error;
         try { shown = cgm::see_body_lists(ByteView(bytes.data(), bytes.size())); } catch (const DecodeError& e) { shown_error = e.what(); }
-        cgm::DecodeOptions opt;
-        for (int a = 3; a < argc; ++a) if (std::string(argv[a]) == "--pending") opt.pending_kinds = true;
         const cgm::Ir ir = cgm::decode(s, shown, opt);
         std::size_t want = 0;
         for (const auto& r : s.records) want += r.type == 512;
         std::printf("{\"file\":\"%s\",\"dialect\":\"%s\",\"version\":\"%s\",\"records\":%zu,\"faces\":%zu,\"faces_decoded\":%zu,\"shells\":%zu,\"surfaces\":%zu,\"pcurves\":%zu,\"edges\":%zu,\"see_body\":\"%s\",\"skipped\":[",
                     argv[2], cgm::dialect_name(s.dialect), s.version.c_str(), s.records.size(), want, ir.faces.size(), ir.shells.size(), ir.surfaces.size(), ir.pcurves.size(), ir.edges.size(), shown_error.empty() ? (shown.empty() ? "none" : "ok") : "malformed");
-        for (std::size_t i = 0; i < ir.skipped.size(); ++i) {
-            std::string why = ir.skipped[i].why;
-            for (char& c : why) if (c == '"' || c == '\\') c = '\'';
-            std::printf("%s{\"id\":%u,\"type\":%u,\"why\":\"%s\"}", i ? "," : "", ir.skipped[i].id, ir.skipped[i].type, why.c_str());
-        }
+        for (std::size_t i = 0; i < ir.skipped.size(); ++i)
+            std::printf("%s{\"id\":%u,\"type\":%u,\"why\":\"%s\"}", i ? "," : "", ir.skipped[i].id, ir.skipped[i].type, json_text(ir.skipped[i].why).c_str());
         std::printf("]}\n");
-        if (argc > 3 && std::string(argv[3]) != "--pending") {
+        if (out) {
             const auto b = cgm::serialize(ir);
-            FILE* f = std::fopen(argv[3], "wb");
-            if (!f || std::fwrite(b.data(), 1, b.size(), f) != b.size()) { std::fprintf(stderr, "cannot write %s\n", argv[3]); if (f) std::fclose(f); return 1; }
+            FILE* f = std::fopen(out, "wb");
+            if (!f || std::fwrite(b.data(), 1, b.size(), f) != b.size()) { std::fprintf(stderr, "cannot write %s\n", out); if (f) std::fclose(f); return 1; }
             std::fclose(f);
         }
     } catch (const std::exception& e) {
-        std::string why = e.what();
-        for (char& c : why) if (c == '"' || c == '\\') c = '\'';
-        std::printf("{\"file\":\"%s\",\"error\":\"%s\"}\n", argv[2], why.c_str());
+        std::printf("{\"file\":\"%s\",\"error\":\"%s\"}\n", argv[2], json_text(e.what()).c_str());
         return 1;
     }
     return 0;
 }
 
-// Every CGM record of a part in canonical (varint-dialect) form, one JSON line each:
-// {"id", "type", "refs": [...], "p": payload hex} or {"id", "type", "code", "error", "body": raw body hex}.
+// cgmrec CATPART [--raw]: every CGM record in canonical (varint-dialect) form, one JSON line each:
+// {"id", "type", "refs", "p" [, "body" with --raw]} or {"id", "type", "code", "error", "body"}.
 static int cmd_cgmrec(int argc, char** argv) {
     if (argc < 3) return 2;
     auto bytes = read_file(argv[2]);
-    const bool with_body = argc > 3 && std::string(argv[3]) == "--raw";  // every record's stored body too
+    const bool with_body = argc > 3 && std::string(argv[3]) == "--raw";
     namespace cgm = formats::catia::cgm;
     try {
         const auto st = cgm::find_stream(ByteView(bytes.data(), bytes.size()));
@@ -753,20 +763,17 @@ static int cmd_cgmrec(int argc, char** argv) {
         const auto layout = cgm::compact_layout(s);
         std::vector<cgm::CanonicalRecord> canon;
         if (layout) canon = cgm::canonical_records(s, *layout);
-        static const char* hex = "0123456789abcdef";
         for (std::size_t i = 0; i < s.records.size(); ++i) {
             const cgm::Record& r = s.records[i];
             std::vector<std::uint32_t> refs;
             ByteView p;
+            if (layout && !canon[i].error.empty()) {
+                std::printf("{\"id\":%u,\"type\":%u,\"code\":%u,\"error\":\"%s\",\"body\":\"", r.id, r.type, r.code, json_text(canon[i].error).c_str());
+                print_hex(r.body);
+                std::printf("\"}\n");
+                continue;
+            }
             if (layout) {
-                if (!canon[i].error.empty()) {
-                    std::string why = canon[i].error;
-                    for (char& c : why) if (c == '"' || c == '\\') c = '\'';
-                    std::printf("{\"id\":%u,\"type\":%u,\"code\":%u,\"error\":\"%s\",\"body\":\"", r.id, r.type, r.code, why.c_str());
-                    for (std::size_t j = 0; j < r.body.size; ++j) std::printf("%c%c", hex[r.body[j] >> 4], hex[r.body[j] & 15]);
-                    std::printf("\"}\n");
-                    continue;
-                }
                 refs = canon[i].c.refs;
                 p = ByteView(canon[i].c.payload.data(), canon[i].c.payload.size());
             } else {
@@ -778,10 +785,10 @@ static int cmd_cgmrec(int argc, char** argv) {
             std::printf("{\"id\":%u,\"type\":%u,\"refs\":[", r.id, r.type);
             for (std::size_t j = 0; j < refs.size(); ++j) std::printf("%s%u", j ? "," : "", refs[j]);
             std::printf("],\"p\":\"");
-            for (std::size_t j = 0; j < p.size; ++j) std::printf("%c%c", hex[p[j] >> 4], hex[p[j] & 15]);
+            print_hex(p);
             if (with_body) {
                 std::printf("\",\"body\":\"");
-                for (std::size_t j = 0; j < r.body.size; ++j) std::printf("%c%c", hex[r.body[j] >> 4], hex[r.body[j] & 15]);
+                print_hex(r.body);
             }
             std::printf("\"}\n");
         }

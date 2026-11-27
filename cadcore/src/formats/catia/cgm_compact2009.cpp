@@ -1,23 +1,13 @@
-// CGM compact dialect, 2009Fall streams (directory levels 83..85) -> canonical records.
-//
-// Grammar established over every record of the corpus's 2009Fall parts (219,050 records, each consumed
-// exactly) and against records of the same parts saved by V5R10 / V5R17 (research/cgm/FINDINGS.md):
-// the varint dialect's body grammar (cgm_model.hpp), with
-//   references      varint count, varint absolute ids (as in the varint dialect)
-//   scalar integers compact signed integers when the header's feature byte 0 has bit 3 (0b), else the
-//                   raw i16 / i32 of the varint dialect (01); the i16 sequences of shells and loops stay
-//                   raw i16 in both
-// and these differences per class:
-//   150 line        int form: 0 o d t0 t1; 1 o.x t0 t1 (d = (0, 1)); 2 o.y t0 t1 (d = (1, 0))
-//   170 B-spline    i16 0, knot vector, poles[2], tail (cgm_compact_io.hpp) closing with an int -2
-//   160 Hermite     after the value count (compact streams only) an int equal to the knot vector's fifth
-//                   field; after t0 t1 an int -2
-//   191-193         after the maps an i32; edge curves listing their curves twice (A B A B) add two ints
-//                   (not decoded)
-//   521 loop        the closing int c always follows; c != 0: 4 f64, 4 ints, u8, 24 bytes
-//   knot vector     ints degree, a, x, n, b (b: the number of knots before parameter 0), f64 knots[n],
-//                   ints multiplicities[n]
-//   211, 216        as in the other compact layouts (cgm_compact.cpp)
+// CGM compact 2009Fall streams (directory levels 83..85) -> canonical records: the varint dialect's
+// grammar (cgm_model.hpp) with these differences:
+//   integers        compact signed integers when feature byte 0 has bit 3, else raw i16 / i32; the i16
+//                   sequences of shells and loops stay raw
+//   150 line        int form: 0 o d t0 t1; 1 o.x t0 t1, d = (0, 1); 2 o.y t0 t1, d = (1, 0)
+//   160 Hermite     compact integers: an int equal to the knot vector's b after the value count; int -2 last
+//   130, 170        knot vector, [int rational (130)], poles, tail (cgm_compact_io.hpp)
+//   191-193         an i32 after the maps; A B A B curve lists add two ints
+//   521 loop        int c always; c != 0: 4 f64, 4 ints, u8, 24 bytes
+//   knot vector     ints degree a x n b (b: knots before parameter 0), f64 knots[n], ints mults[n]
 #include "formats/catia/cgm_compact.hpp"
 
 #include <string>
@@ -35,13 +25,8 @@ std::vector<std::uint32_t> abs_refs(In& in) {
     return r;
 }
 
-// Knot vector -> i32 degree, a, x, n, b, f64 knots[n], i32 multiplicities[n].
 struct Knots { int n = 0, b = 0; std::size_t poles = 0; };
-Knots knot_vector(In& in, Out& o, bool counted = false) {
-    if (counted) {  // 216: the section count precedes the knot vector
-        const std::int32_t c = in.i32();
-        o.i32(c);
-    }
+Knots knot_vector(In& in, Out& o) {
     const int deg = in.i32(), a = in.i32(), x = in.i32(), n = in.i32(), b = in.i32();
     if (n < 2 || n > 100000 || deg < 1 || deg > 30) bad("knot vector size", in.at);
     o.i32(deg); o.i32(a); o.i32(x); o.i32(n); o.i32(b);
@@ -57,8 +42,6 @@ Knots knot_vector(In& in, Out& o, bool counted = false) {
     return {n, b, sum - std::size_t(deg) - 1};
 }
 
-void f64s(In& in, Out& o, std::size_t n) { for (std::size_t i = 0; i < n; ++i) o.f64(in.f64()); }
-
 }  // namespace
 
 Canonical canonical_2009(const Record& r, bool compact_ints) {
@@ -68,7 +51,6 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
     c.type = r.type;
     if (r.type == 0) throw DecodeError(ErrorCode::Unsupported, "compact type code " + std::to_string(r.code) + " not mapped", r.offset);
     c.refs = abs_refs(in);
-    // raw i16 (the shell and loop sequences are raw in both integer forms)
     auto raw16 = [&] { in.need(2); const auto v = std::int16_t(load_u16(in.b.data + in.k, false)); in.k += 2; return std::int32_t(v); };
     switch (r.type) {
         case 13: case 513: break;
@@ -91,7 +73,7 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
         case 521: {
             const std::uint32_t n = in.count();
             o.count(n);
-            for (int i = 0; i < 3; ++i) o.i16(in.i16());  // a, b, the first value of the sequence
+            for (int i = 0; i < 3; ++i) o.i16(in.i16());
             for (std::uint32_t i = 0; i < 3 * n; ++i) o.i16(raw16());
             const std::int32_t cl = in.i16();
             o.i16(cl);
@@ -164,38 +146,32 @@ Canonical canonical_2009(const Record& r, bool compact_ints) {
             if (in.i16() != -2) bad("Hermite closing value", r.offset);
             break;
         }
-        case 130: {
+        case 130: case 170: {
+            const bool pc = r.type == 170;
+            if (pc) {
+                if (in.i16() != 0) bad("B-spline p-curve form", r.offset);
+                o.i16(0);
+            }
             const std::size_t np = knot_vector(in, o).poles;
-            const std::int32_t rat = in.i16();
-            o.i16(rat);
-            const std::size_t m = np * (rat ? 4 : 3);
-            if (m > in.left() / 8) bad("B-spline curve poles past the record", r.offset);
+            std::int32_t rat = 0;
+            if (!pc) { rat = in.i16(); o.i16(rat); }
+            const std::size_t m = np * std::size_t(pc ? 2 : rat ? 4 : 3);
+            if (m > in.left() / 8) bad(pc ? "B-spline p-curve poles past the record" : "B-spline curve poles past the record", r.offset);
             f64s(in, o, m);
-            bspline_pcurve_tail(in, o);
-            break;
-        }
-        case 170: {
-            if (in.i16() != 0) bad("B-spline p-curve form", r.offset);
-            o.i16(0);
-            const std::size_t np = knot_vector(in, o).poles;
-            if (2 * np > in.left() / 8) bad("B-spline p-curve poles past the record", r.offset);
-            f64s(in, o, 2 * np);
-            bspline_pcurve_tail(in, o);
+            bspline_tail(in, o);
             break;
         }
         case 231:
             knot_vector(in, o);
             knot_vector(in, o);
             o.i16(in.i16());
-            o.raw(in.raw(in.left()));  // poles, weights, a block (cgm_model.hpp reads poles and weights)
+            o.raw(in.raw(in.left()));
             break;
         case 524: o.i16(in.i16()); break;
         case 525: o.i32(in.i32()); o.i16(in.i16()); break;
-        // the decoder uses the references and the leading doubles of these (cgm_model.hpp)
         case 216: case 243: {
-            const auto [n, b, np] = knot_vector(in, o, true);
-            (void)b;
-            (void)np;
+            o.i32(in.i32());
+            const int n = knot_vector(in, o).n;
             f64s(in, o, (r.type == 216 ? 30 : 18) * std::size_t(n) + 4);
             o.raw(in.raw(in.left()));
             break;

@@ -1,5 +1,4 @@
-// Reading compact record bodies and writing canonical (varint-dialect) payloads; shared by the
-// compact transcoders (cgm_compact.cpp, cgm_compact2009.cpp).
+// Compact record bodies in, canonical (varint-dialect) payloads out; shared by the compact transcoders.
 #pragma once
 
 #include <cstdint>
@@ -15,21 +14,23 @@ namespace cadcore::formats::catia::cgm::compact_io {
 
 [[noreturn]] inline void bad(const std::string& what, std::size_t at) { fail(ErrorCode::Malformed, "CGM compact record: " + what, at); }
 
-// Reads a compact body.
+inline double load_f64_le(const std::uint8_t* p) { double d; std::memcpy(&d, p, 8); return d; }
+
 struct In {
     ByteView b;
     std::uint32_t self;
-    bool ci;
+    bool ci;  // small integers as compact signed integers (else raw i16 / i32)
     std::size_t at, k = 0;
 
     void need(std::size_t n) const { if (k + n > b.size) fail(ErrorCode::Truncated, "CGM compact record ends early", at + k); }
+    // low bits 01: +(x >> 2); 11: -(x >> 2) - 1; 00 / 10: (x >> 2 & 3) bytes follow, x's high nibble on top, + / -
     std::int64_t sint() {
         need(1);
         const std::uint8_t x = b[k++];
         const unsigned lo = x & 3;
         if (lo == 1) return x >> 2;
         if (lo == 3) return -std::int64_t(x >> 2) - 1;
-        const unsigned n = x >> 2 & 3;  // bytes that follow; the first byte's high nibble tops the value
+        const unsigned n = x >> 2 & 3;
         need(n);
         std::uint64_t v = 0;
         for (unsigned i = 0; i < n; ++i) v |= std::uint64_t(b[k++]) << (8 * i);
@@ -41,7 +42,7 @@ struct In {
     std::vector<std::uint32_t> refs(std::size_t n) { std::vector<std::uint32_t> r(n); for (auto& x : r) x = ref(); return r; }
     std::vector<std::uint32_t> refs() { return refs(count()); }
     std::uint8_t u8() { need(1); return b[k++]; }
-    double f64() { need(8); double d; std::memcpy(&d, b.data + k, 8); k += 8; return d; }
+    double f64() { need(8); const double d = load_f64_le(b.data + k); k += 8; return d; }
     std::int32_t i16() { if (ci) return std::int32_t(sint()); need(2); auto v = std::int16_t(load_u16(b.data + k, false)); k += 2; return v; }
     std::int32_t i32() { if (ci) return std::int32_t(sint()); need(4); auto v = std::int32_t(load_u32(b.data + k, false)); k += 4; return v; }
     std::vector<int> bits(std::size_t n) {
@@ -56,7 +57,6 @@ struct In {
     std::size_t left() const { return b.size - k; }
 };
 
-// Writes a payload in the varint dialect's form.
 struct Out {
     std::vector<std::uint8_t> p;
     void u8(std::uint8_t v) { p.push_back(v); }
@@ -75,16 +75,17 @@ struct Out {
     }
 };
 
-// Tail of a 170 B-spline p-curve and a 130 B-spline curve as stored (2009Fall, 2011Spring): int a, int b, f64 0 L 1 0 (L: a knot
-// interval), u8 c, [c != 0: further fields, kept as written; not decoded], int -2. The varint dialect's
-// form drops the closing -2.
-inline void bspline_pcurve_tail(In& in, Out& o) {
+inline void f64s(In& in, Out& o, std::size_t n) { for (std::size_t i = 0; i < n; ++i) o.f64(in.f64()); }
+
+// B-spline (130, 170) tail as stored: int a, int b, f64 0 L 1 0, u8 c, [c != 0: kept as written], int -2.
+// The canonical form drops the closing -2.
+inline void bspline_tail(In& in, Out& o) {
     o.i16(in.i16());
     o.i16(in.i16());
-    for (int i = 0; i < 4; ++i) o.f64(in.f64());
+    f64s(in, o, 4);
     const std::uint8_t c = in.u8();
     o.u8(c);
-    const std::size_t close = in.ci ? 1 : 2;  // int -2
+    const std::size_t close = in.ci ? 1 : 2;
     if (in.left() < close) bad("B-spline p-curve closing value", in.at);
     if (c) o.raw(in.raw(in.left() - close));
     if (in.i16() != -2) bad("B-spline p-curve closing value", in.at);

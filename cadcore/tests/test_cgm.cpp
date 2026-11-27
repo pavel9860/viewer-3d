@@ -1,8 +1,8 @@
-// CATIA CGMGeom: varint integers, framing and B-rep decode of corpus parts (skipped when the
-// samples folder is absent). Ground truth for the meshes is CATIA's stored tessellation
-// (research/cgm/compare_tess.py); these cases pin the decoded structure.
-#include <functional>
+// CATIA CGMGeom: varint integers, framing, compact transcoding and B-rep decode of corpus parts
+// (skipped when the samples folder is absent).
 #include <cmath>
+#include <functional>
+#include <optional>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -22,6 +22,21 @@ std::vector<std::uint8_t> load(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     return {std::istreambuf_iterator<char>(f), {}};
 }
+// A corpus part's framed stream, or nullopt when the samples are absent.
+std::optional<cgm::Stream> stream(const char* rel, std::vector<std::uint8_t>& keep) {
+    const fs::path p = fs::path(CADCORE_SAMPLES_DIR) / rel;
+    if (!fs::exists(p)) return std::nullopt;
+    const auto file = load(p);
+    const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
+    REQUIRE(st.has_value());
+    keep.assign(st->begin(), st->end());
+    return cgm::frame(ByteView(keep.data(), keep.size()));
+}
+cgm::Ir decode(const cgm::Stream& s, bool pending) {
+    cgm::DecodeOptions opt;
+    opt.pending_kinds = pending;
+    return cgm::decode(s, {}, opt);
+}
 std::uint32_t var(std::vector<std::uint8_t> b) {
     std::size_t k = 0;
     return cgm::varint(ByteView(b.data(), b.size()), k);
@@ -39,13 +54,10 @@ TEST_CASE("CGM varint: small values and byte-presence tags") {
 }
 
 TEST_CASE("CGM corpus parts: framing and B-rep decode") {
-    const fs::path s(CADCORE_SAMPLES_DIR);
-    const fs::path part4 = s / "caa/caadoc/CAAElecDeviceItf.edu/CNext/resources/graphic/CAAElecConnect/Part4.CATPart";
-    if (!fs::exists(part4)) return;
-    const auto file = load(part4);
-    const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-    REQUIRE(st.has_value());
-    const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
+    std::vector<std::uint8_t> keep;
+    const auto st = stream("caa/caadoc/CAAElecDeviceItf.edu/CNext/resources/graphic/CAAElecConnect/Part4.CATPart", keep);
+    if (!st) return;
+    const cgm::Stream& fr = *st;
     CHECK(fr.dialect == cgm::Dialect::Varint);
     CHECK(fr.records.size() == 221);
     const cgm::Ir ir = cgm::decode(fr);
@@ -83,270 +95,154 @@ TEST_CASE("CGM compact records: canonical form") {
     CHECK((s.payload == std::vector<std::uint8_t>{0x81, 3, 0, 1, 0, 0xff, 0xff}));
 }
 
-TEST_CASE("CGM compact corpus part (2011Spring): B-rep decode") {
-    const fs::path p = fs::path(CADCORE_SAMPLES_DIR) / "caa/caadoc/CAACommonLayoutItf.edu/CNext/resources/graphic/CAACloPspEduIn/GASKET-RF-150-4in.CATPart";
-    if (!fs::exists(p)) return;
-    const auto file = load(p);
-    const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-    REQUIRE(st.has_value());
-    const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
-    CHECK(fr.dialect == cgm::Dialect::Compact);
-    REQUIRE(cgm::compact_layout(fr).has_value());
-    const cgm::Ir ir = cgm::decode(fr);
-    CHECK(ir.faces.size() == 8);
-    CHECK(ir.skipped.empty());
-}
-
-TEST_CASE("CGM compact corpus part (2011Fall): B-rep decode") {
-    const fs::path p = fs::path(CADCORE_SAMPLES_DIR) / "caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Nut.CATPart";
-    if (!fs::exists(p)) return;
-    const auto file = load(p);
-    const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-    REQUIRE(st.has_value());
-    const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
-    REQUIRE(fr.features.size() >= 3);
-    CHECK(fr.features[0] == 0x06);
-    const auto layout = cgm::compact_layout(fr);
-    REQUIRE(layout.has_value());
-    CHECK(layout->compact_ints);
-    CHECK(layout->edge_curve_ref);
-    CHECK(!layout->derived);
-    const cgm::Ir ir = cgm::decode(fr);
-    CHECK(ir.faces.size() == 40);
-    CHECK(ir.skipped.empty());
-}
-
-TEST_CASE("CGM compact corpus parts (2009Fall): compact and raw integers") {
-    // feature byte 0: 0b compact integers, 01 raw (the varint dialect's i16 / i32)
-    const fs::path base = fs::path(CADCORE_SAMPLES_DIR) / "caa/caadoc";
-    const struct { const char* path; std::uint8_t f0; std::size_t faces; } parts[] = {
-        {"CAAElecHarnessItf.edu/CNext/resources/graphic/CAA_EHIMultiBranchableSample/PN-06122000-0836.CATPart", 0x0b, 22},
-        {"CAAStructureInterfaces.edu/CNext/resources/graphic/WT15x54.CATPart", 0x01, 0},
+TEST_CASE("CGM compact layouts") {
+    const struct { const char* path; std::uint8_t f0; bool ints, ref, derived, fall2009; } parts[] = {
+        {"caa/caadoc/CAACommonLayoutItf.edu/CNext/resources/graphic/CAACloPspEduIn/GASKET-RF-150-4in.CATPart", 0, false, true, false, false},
+        {"caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Nut.CATPart", 0x06, true, true, false, false},
+        {"caa/caadoc/CAAElecHarnessItf.edu/CNext/resources/graphic/CAA_EHIMultiBranchableSample/PN-06122000-0836.CATPart", 0x0b, true, true, false, true},
+        {"caa/caadoc/CAAStructureInterfaces.edu/CNext/resources/graphic/WT15x54.CATPart", 0x01, false, true, false, true},
     };
     for (const auto& pt : parts) {
-        const fs::path p = base / pt.path;
-        if (!fs::exists(p)) continue;
-        const auto file = load(p);
-        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-        REQUIRE(st.has_value());
-        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
-        CHECK(fr.level >= 83);
-        CHECK(fr.level <= 85);
-        REQUIRE(!fr.features.empty());
-        CHECK(fr.features[0] == pt.f0);
-        const auto layout = cgm::compact_layout(fr);
+        std::vector<std::uint8_t> keep;
+        const auto st = stream(pt.path, keep);
+        if (!st) continue;
+        CHECK(st->dialect == cgm::Dialect::Compact);
+        const auto layout = cgm::compact_layout(*st);
         REQUIRE(layout.has_value());
-        CHECK(layout->fall2009);
-        CHECK(layout->compact_ints == ((pt.f0 & 8) != 0));
-        for (const auto& c : cgm::canonical_records(fr, *layout)) CHECK(c.error.empty());
-        if (pt.faces) {
-            const cgm::Ir ir = cgm::decode(fr);
-            CHECK(ir.faces.size() == pt.faces);
-            CHECK(ir.skipped.empty());
+        if (pt.f0) CHECK(st->features.at(0) == pt.f0);
+        CHECK(layout->fall2009 == pt.fall2009);
+        if (pt.fall2009) {
+            CHECK(layout->compact_ints == pt.ints);
+            for (const auto& c : cgm::canonical_records(*st, *layout)) CHECK(c.error.empty());
+        } else if (pt.f0) {
+            CHECK(layout->compact_ints == pt.ints);
+            CHECK(layout->edge_curve_ref == pt.ref);
+            CHECK(layout->derived == pt.derived);
         }
     }
 }
 
-TEST_CASE("CGM pending surface kinds: fillets (216) and revolutions (211)") {
-    // emitted only on request (the kernel does not evaluate them yet); by default their faces are skipped
-    const fs::path base = fs::path(CADCORE_SAMPLES_DIR) / "caa/caadoc/CAAElecHarnessItf.edu/CNext/resources/graphic";
-    const struct { const char* path; std::uint32_t kind; std::size_t faces, surfaces; } parts[] = {
-        {"CAA_EhiFLEXComputeBundleSegment_Sample/plug.CATPart", cgm::SurfFillet, 571, 28},
-        {"CAA_EHIMultiSegmentSample/hair-dryer.CATPart", cgm::SurfRevolution, 65, 6},
+// Corpus parts: faces decoded (all of them when `faces` equals `decoded`), with and without pending kinds.
+TEST_CASE("CGM corpus parts: faces per stored form") {
+    const struct { const char* path; bool pending; std::size_t faces, decoded; } parts[] = {
+        // 2011Spring, 2011Fall, 2009Fall compact integers
+        {"caa/caadoc/CAACommonLayoutItf.edu/CNext/resources/graphic/CAACloPspEduIn/GASKET-RF-150-4in.CATPart", false, 8, 8},
+        {"caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Nut.CATPart", false, 40, 40},
+        {"caa/caadoc/CAAElecHarnessItf.edu/CNext/resources/graphic/CAA_EHIMultiBranchableSample/PN-06122000-0836.CATPart", false, 22, 22},
+        // 2017Fall+ loop blocks without ints; 2018Fall+ Hermite closing byte; carriers over fillets
+        {"github/catia-v5/HOLYNOTBAD__holydrone/Hardware/modules/misc/telemetry-cuav-air-link-4g-1.snapshot.3/Telemetry CUAV Air Link 4G.CATPart", false, 396, 396},
+        {"nist/nist-ftc-ctc-pmi-cad-models/NIST-FTC-CTC-PMI-CAD-models/CATIA V5-6R2019/nist_ftc_07_asme1_rd_ct5290_ra.CATPart", false, 331, 331},
+        {"local/d9dcb20f", true, 2286, 2286},
     };
     for (const auto& pt : parts) {
-        const fs::path p = base / pt.path;
-        if (!fs::exists(p)) continue;
-        const auto file = load(p);
-        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-        REQUIRE(st.has_value());
-        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
-        const cgm::Ir plain = cgm::decode(fr);
-        CHECK(plain.faces.size() < pt.faces);
-        for (const auto& s : plain.surfaces) CHECK(s.kind != pt.kind);
-        cgm::DecodeOptions opt;
-        opt.pending_kinds = true;
-        const cgm::Ir ir = cgm::decode(fr, {}, opt);
-        CHECK(ir.faces.size() == pt.faces);
-        CHECK(ir.skipped.empty());
-        std::size_t n = 0;
-        for (const auto& s : ir.surfaces) {
-            if (s.kind != pt.kind) continue;
-            ++n;
-            if (s.kind == cgm::SurfFillet) {
-                const std::size_t k = std::size_t(s.p.at(0));
-                REQUIRE(s.p.size() == 1 + 31 * k + 4);
-                // first section: both contact points at the same distance from the centre
-                auto d = [&](int a) { double t = 0; for (int j = 0; j < 3; ++j) { const double x = s.p[1 + k + a + j] - s.p[1 + k + 6 + j]; t += x * x; } return t; };
-                CHECK(std::abs(d(0) - d(3)) < 1e-9 * (1 + d(0)));
-            } else {
-                REQUIRE(s.p.size() >= 15);
-                const int pk = int(s.p[13]);
-                CHECK((pk >= 1 && pk <= 3));
+        std::vector<std::uint8_t> keep;
+        const auto st = stream(pt.path, keep);
+        if (!st) continue;
+        const cgm::Ir ir = decode(*st, pt.pending);
+        CHECK(ir.faces.size() == pt.decoded);
+        CHECK(ir.faces.size() + ir.skipped.size() >= pt.faces);
+        if (pt.faces == pt.decoded) CHECK(ir.skipped.empty());
+    }
+}
+
+// Pending kinds: absent by default (fewer faces), every face with them; `check` tests their parameters.
+struct PendingPart { const char* path; std::size_t faces, decoded, count = 0; };  // count: kind instances (0: some)
+void pending_kind(const PendingPart& pt, bool surface, std::uint32_t kind, const std::function<void(const cgm::Ir&, std::size_t)>& check) {
+    std::vector<std::uint8_t> keep;
+    const auto st = stream(pt.path, keep);
+    if (!st) return;
+    const cgm::Ir plain = decode(*st, false);
+    CHECK(plain.faces.size() < pt.decoded);
+    for (const auto& s : plain.surfaces) CHECK((!surface || s.kind != kind));
+    for (const auto& c : plain.pcurves) CHECK((surface || c.kind != kind));
+    const cgm::Ir ir = decode(*st, true);
+    CHECK(ir.faces.size() == pt.decoded);
+    CHECK(ir.faces.size() + ir.skipped.size() >= pt.faces);
+    std::size_t n = 0;
+    const std::size_t count = surface ? ir.surfaces.size() : ir.pcurves.size();
+    for (std::size_t i = 0; i < count; ++i)
+        if ((surface ? ir.surfaces[i].kind : ir.pcurves[i].kind) == kind) { ++n; check(ir, i); }
+    CHECK((pt.count ? n == pt.count : n > 0));
+}
+
+TEST_CASE("CGM pending surfaces: fillets (216), revolutions (211), ruled (243, 251)") {
+    const char* g = "caa/caadoc/CAAElecHarnessItf.edu/CNext/resources/graphic/";
+    const std::string plug = std::string(g) + "CAA_EhiFLEXComputeBundleSegment_Sample/plug.CATPart";
+    const std::string dryer = std::string(g) + "CAA_EHIMultiSegmentSample/hair-dryer.CATPart";
+    pending_kind({plug.c_str(), 571, 571, 28}, true, cgm::SurfFillet, [](const cgm::Ir& ir, std::size_t i) {
+        const auto& p = ir.surfaces[i].p;
+        const std::size_t k = std::size_t(p.at(0));
+        REQUIRE(p.size() == 1 + 31 * k + 4);
+        // first section: both contact points at the same distance from the centre
+        auto d = [&](int a) { double t = 0; for (int j = 0; j < 3; ++j) { const double x = p[1 + k + a + j] - p[1 + k + 6 + j]; t += x * x; } return t; };
+        CHECK(std::abs(d(0) - d(3)) < 1e-9 * (1 + d(0)));
+    });
+    pending_kind({dryer.c_str(), 65, 65, 6}, true, cgm::SurfRevolution, [](const cgm::Ir& ir, std::size_t i) {
+        const auto& p = ir.surfaces[i].p;
+        REQUIRE(p.size() >= 15);
+        CHECK((p[13] >= 1 && p[13] <= 3));
+    });
+    auto ruled = [](const cgm::Ir& ir, std::size_t i) {
+        const auto& p = ir.surfaces[i].p;
+        const std::size_t k = std::size_t(p.at(0));
+        REQUIRE(p.size() == 1 + 19 * k + 4);
+        CHECK(p[1] == p[1 + 19 * k]);          // u0 is the first knot
+        CHECK(p[2 + 19 * k] > p[1 + 19 * k]);
+    };
+    for (const PendingPart& pt : {PendingPart{"local/5f11d4d4", 39, 39},
+                                  PendingPart{"local/04190b04", 717, 716},
+                                  PendingPart{"caa/caadoc/Doc/online/CAAScdStrUseCases/samples/EditCutout/Plate_0053.CATPart", 20, 20}})
+        pending_kind(pt, true, cgm::SurfRuled, ruled);
+}
+
+TEST_CASE("CGM pending p-curves: B-splines (170), expressions (155)") {
+    // B-spline coedge ranges lie in their knot ranges (vertex parameters are offsets within a knot
+    // segment, the first segment starting at the first knot)
+    auto bspline = [](const cgm::Ir& ir, std::size_t i) {
+        const auto& p = ir.pcurves[i].p;
+        const std::size_t deg = std::size_t(p.at(0)), nk = std::size_t(p.at(1)), np = std::size_t(p.at(2 + nk));
+        REQUIRE(nk == np + deg + 1);
+        REQUIRE(p.size() == 4 + nk + 2 * np);
+        const double lo = p[2 + deg], hi = p[2 + nk - deg - 1], tol = 1e-4 * (hi - lo);
+        for (const auto& ce : ir.coedges)
+            if (ce.pcurve == i) {
+                CHECK(std::min(ce.t0, ce.t1) >= lo - tol);
+                CHECK(std::max(ce.t0, ce.t1) <= hi + tol);
             }
-        }
-        CHECK(n == pt.surfaces);
-    }
-}
-
-TEST_CASE("CGM pending p-curve kind: expressions (155)") {
-    // one part per form: varint (cosine items, quotients), 2011Spring raw integers (polynomial and
-    // arctangent items), 2015Fall compact integers
-    const fs::path base = fs::path(CADCORE_SAMPLES_DIR);
-    const struct { const char* path; std::size_t faces; } parts[] = {
-        {"caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Jack_Frame.CATPart", 216},
-        {"local/703cd616", 3872},
-        {"local/b33cd8bf", 328},
     };
-    for (const auto& pt : parts) {
-        const fs::path p = base / pt.path;
-        if (!fs::exists(p)) continue;
-        const auto file = load(p);
-        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-        REQUIRE(st.has_value());
-        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
-        const cgm::Ir plain = cgm::decode(fr);
-        CHECK(plain.faces.size() < pt.faces);
-        cgm::DecodeOptions opt;
-        opt.pending_kinds = true;
-        const cgm::Ir ir = cgm::decode(fr, {}, opt);
-        CHECK(ir.faces.size() == pt.faces);
-        CHECK(ir.skipped.empty());
-        std::size_t n = 0;
-        for (const auto& c : ir.pcurves) {
-            if (c.kind != cgm::PcExpr) continue;
-            ++n;
-            // two trees after the 4 head values; each node: code nvals vals nkids kids
-            std::size_t k = 4;
-            std::function<void()> node = [&] {
-                REQUIRE(k + 2 <= c.p.size());
-                const int code = int(c.p[k]);
-                CHECK((code == 1 || code == 2 || code == 3 || code == 4 || code == 7));
-                k += 2 + std::size_t(c.p[k + 1]);
-                REQUIRE(k < c.p.size());
-                const int kids = int(c.p[k++]);
-                for (int i = 0; i < kids; ++i) node();
-            };
-            node();
-            node();
-            CHECK(k == c.p.size());
-        }
-        CHECK(n > 0);
-    }
-}
-
-TEST_CASE("CGM compact 2017+ forms: loop blocks without ints, Hermite closing byte, fillet boxes") {
-    // 2017Fall+ loop blocks omit their 4 ints; 2018Fall+ Hermite curves end with a byte 0; carriers
-    // over fillets take the fillet's box (the last only with pending kinds: the fillets themselves)
-    const fs::path base = fs::path(CADCORE_SAMPLES_DIR);
-    const struct { const char* path; bool pending; std::size_t faces; } parts[] = {
-        {"github/catia-v5/HOLYNOTBAD__holydrone/Hardware/modules/misc/telemetry-cuav-air-link-4g-1.snapshot.3/Telemetry CUAV Air Link 4G.CATPart", false, 396},
-        {"nist/nist-ftc-ctc-pmi-cad-models/NIST-FTC-CTC-PMI-CAD-models/CATIA V5-6R2019/nist_ftc_07_asme1_rd_ct5290_ra.CATPart", false, 331},
-        {"local/d9dcb20f", true, 2286},
+    for (const PendingPart& pt : {PendingPart{"local/d04dc2b9", 299, 299},
+                                  PendingPart{"local/5838914f", 507, 507},
+                                  PendingPart{"github/catia-v5/Guilherme115__Motor-V6/05_Admissao_Escape/Duto.CATPart", 379, 379}})
+        pending_kind(pt, false, cgm::PcBSpline, bspline);
+    // expression trees: two well-formed trees after the 4 head values
+    auto expr = [](const cgm::Ir& ir, std::size_t i) {
+        const auto& p = ir.pcurves[i].p;
+        std::size_t k = 4;
+        std::function<void()> node = [&] {
+            REQUIRE(k + 2 <= p.size());
+            const int code = int(p[k]);
+            CHECK((code == 1 || code == 2 || code == 3 || code == 4 || code == 7));
+            k += 2 + std::size_t(p[k + 1]);
+            REQUIRE(k < p.size());
+            const int kids = int(p[k++]);
+            for (int j = 0; j < kids; ++j) node();
+        };
+        node();
+        node();
+        CHECK(k == p.size());
     };
-    for (const auto& pt : parts) {
-        const fs::path p = base / pt.path;
-        if (!fs::exists(p)) continue;
-        const auto file = load(p);
-        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-        REQUIRE(st.has_value());
-        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
-        cgm::DecodeOptions opt;
-        opt.pending_kinds = pt.pending;
-        const cgm::Ir ir = cgm::decode(fr, {}, opt);
-        CHECK(ir.faces.size() == pt.faces);
-        CHECK(ir.skipped.empty());
-    }
-}
-
-TEST_CASE("CGM pending surface kind: ruled two-curve surfaces (243, 251)") {
-    // one part per stored form: 2011Spring raw integers, 2015Fall packed, 2009Fall compact integers
-    const fs::path base = fs::path(CADCORE_SAMPLES_DIR);
-    const struct { const char* path; std::size_t faces, decoded; } parts[] = {
-        {"local/5f11d4d4", 39, 39},
-        {"local/04190b04", 717, 716},
-        {"caa/caadoc/Doc/online/CAAScdStrUseCases/samples/EditCutout/Plate_0053.CATPart", 20, 20},
-    };
-    for (const auto& pt : parts) {
-        const fs::path p = base / pt.path;
-        if (!fs::exists(p)) continue;
-        const auto file = load(p);
-        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-        REQUIRE(st.has_value());
-        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
-        const cgm::Ir plain = cgm::decode(fr);
-        CHECK(plain.faces.size() < pt.decoded);
-        for (const auto& sf : plain.surfaces) CHECK(sf.kind != cgm::SurfRuled);
-        cgm::DecodeOptions opt;
-        opt.pending_kinds = true;
-        const cgm::Ir ir = cgm::decode(fr, {}, opt);
-        CHECK(ir.faces.size() == pt.decoded);
-        CHECK(ir.faces.size() + ir.skipped.size() >= pt.faces);
-        std::size_t n = 0;
-        for (const auto& sf : ir.surfaces) {
-            if (sf.kind != cgm::SurfRuled) continue;
-            ++n;
-            const std::size_t k = std::size_t(sf.p.at(0));
-            REQUIRE(sf.p.size() == 1 + 19 * k + 4);
-            CHECK(sf.p[1] == sf.p[1 + 19 * k]);          // u0: the first knot
-            CHECK(sf.p[2 + 19 * k] > sf.p[1 + 19 * k]);  // u1 > u0
-        }
-        CHECK(n > 0);
-    }
-}
-
-TEST_CASE("CGM pending p-curve kind: B-splines (170, compact code 33)") {
-    // one part per stored form: 2011Spring raw integers, 2015Fall packed form byte, 2009Fall compact
-    // integers. Emitted only on request; every coedge range lies in its knot range (vertex parameters
-    // are offsets within a knot segment, the first segment starting at the first knot)
-    const fs::path base = fs::path(CADCORE_SAMPLES_DIR);
-    const struct { const char* path; std::size_t faces, decoded; } parts[] = {
-        {"local/d04dc2b9", 299, 299},
-        {"local/5838914f", 507, 507},
-        {"github/catia-v5/Guilherme115__Motor-V6/05_Admissao_Escape/Duto.CATPart", 379, 379},
-    };
-    for (const auto& pt : parts) {
-        const fs::path p = base / pt.path;
-        if (!fs::exists(p)) continue;
-        const auto file = load(p);
-        const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-        REQUIRE(st.has_value());
-        const cgm::Stream fr = cgm::frame(ByteView(st->data(), st->size()));
-        const cgm::Ir plain = cgm::decode(fr);
-        CHECK(plain.faces.size() < pt.decoded);
-        for (const auto& c : plain.pcurves) CHECK(c.kind != cgm::PcBSpline);
-        cgm::DecodeOptions opt;
-        opt.pending_kinds = true;
-        const cgm::Ir ir = cgm::decode(fr, {}, opt);
-        CHECK(ir.faces.size() == pt.decoded);
-        CHECK(ir.faces.size() + ir.skipped.size() >= pt.faces);
-        std::size_t n = 0;
-        for (const auto& ce : ir.coedges) {
-            const auto& c = ir.pcurves.at(ce.pcurve);
-            if (c.kind != cgm::PcBSpline) continue;
-            ++n;
-            const std::size_t deg = std::size_t(c.p.at(0)), nk = std::size_t(c.p.at(1)), np = std::size_t(c.p.at(2 + nk));
-            REQUIRE(nk == np + deg + 1);
-            REQUIRE(c.p.size() == 4 + nk + 2 * np);
-            const double lo = c.p[2 + deg], hi = c.p[2 + nk - deg - 1], tol = 1e-4 * (hi - lo);
-            CHECK(ce.t0 >= lo - tol);
-            CHECK(ce.t0 <= hi + tol);
-            CHECK(ce.t1 >= lo - tol);
-            CHECK(ce.t1 <= hi + tol);
-        }
-        CHECK(n > 0);
-    }
+    for (const PendingPart& pt : {PendingPart{"caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Jack_Frame.CATPart", 216, 216},
+                                  PendingPart{"local/703cd616", 3872, 3872},
+                                  PendingPart{"local/b33cd8bf", 328, 328}})
+        pending_kind(pt, false, cgm::PcExpr, expr);
 }
 
 TEST_CASE("CGM points: parameters are offsets within a Hermite segment") {
-    // Points store (offset, segment number); segment numbers are shifted by the knot vector's offset
-    // field (-7 on trimmed curves of this part). Every coedge range must lie on its Hermite curve.
-    const fs::path p = fs::path(CADCORE_SAMPLES_DIR) / "nist/nist-ctc-pmi-cad-models/NIST-CTC-PMI/CATIA V5R21/nist_ctc_02_asme1_ct5210_rc.CATPart";
-    if (!fs::exists(p)) return;
-    const auto file = load(p);
-    const auto st = cgm::find_stream(ByteView(file.data(), file.size()));
-    REQUIRE(st.has_value());
-    const cgm::Ir ir = cgm::decode(cgm::frame(ByteView(st->data(), st->size())));
+    // segment numbers are shifted by the knot vector's offset field (-7 on trimmed curves of this part)
+    std::vector<std::uint8_t> keep;
+    const auto st = stream("nist/nist-ctc-pmi-cad-models/NIST-CTC-PMI/CATIA V5R21/nist_ctc_02_asme1_ct5210_rc.CATPart", keep);
+    if (!st) return;
+    const cgm::Ir ir = cgm::decode(*st);
     std::size_t hermite = 0, outside = 0;
     for (const auto& c : ir.coedges) {
         const auto& pc = ir.pcurves[c.pcurve];

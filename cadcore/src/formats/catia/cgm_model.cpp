@@ -51,7 +51,17 @@ struct Rd {
     std::size_t left() const { return b.size - k; }
 };
 
-struct KnotVector { int degree = 0; int first = 0; std::vector<double> knots; std::vector<int> mults; std::size_t poles() const { std::size_t n = 0; for (int m : mults) n += std::size_t(m); return n - std::size_t(degree) - 1; } };
+struct KnotVector {
+    int degree = 0, first = 0;
+    std::vector<double> knots;
+    std::vector<int> mults;
+    std::size_t poles() const { std::size_t n = 0; for (int m : mults) n += std::size_t(m); return n - std::size_t(degree) - 1; }
+    std::vector<double> expanded() const {
+        std::vector<double> k;
+        for (std::size_t i = 0; i < knots.size(); ++i) k.insert(k.end(), std::size_t(mults[i]), knots[i]);
+        return k;
+    }
+};
 
 KnotVector knot_vector(Rd& r) {
     KnotVector kv;
@@ -64,6 +74,30 @@ KnotVector knot_vector(Rd& r) {
     for (int i = 0; i < n; ++i) kv.knots.push_back(r.f64());
     for (int i = 0; i < n; ++i) kv.mults.push_back(r.i32());
     return kv;
+}
+
+// B-spline after its knot vector -> degree nk knots[nk] (expanded) np rational poles[np][dim] [weights].
+void bspline(Rd& r, const KnotVector& kv, int dim, bool rational, std::vector<double>& p) {
+    const std::size_t np = kv.poles();
+    const auto knots = kv.expanded();
+    p.push_back(double(kv.degree));
+    p.push_back(double(knots.size()));
+    p.insert(p.end(), knots.begin(), knots.end());
+    p.push_back(double(np));
+    p.push_back(rational ? 1.0 : 0.0);
+    for (std::size_t i = 0; i < std::size_t(dim) * np; ++i) p.push_back(r.f64());
+    if (rational) for (std::size_t i = 0; i < np; ++i) p.push_back(r.f64());
+}
+
+// 216 / 243: i32 n, knot vector (degree 5, n knots), m values per section with two derivatives, box
+// -> n knots[n] values[3 n m] box[4].
+void sections(Rd& r, int m, std::size_t at, std::vector<double>& p) {
+    const std::int32_t n = r.i32();
+    const KnotVector kv = knot_vector(r);
+    if (kv.degree != 5 || kv.knots.size() != std::size_t(n)) bad("section knot vector", at);
+    p.push_back(double(n));
+    p.insert(p.end(), kv.knots.begin(), kv.knots.end());
+    for (std::size_t i = 0; i < 3 * std::size_t(m) * std::size_t(n) + 4; ++i) p.push_back(r.f64());
 }
 
 class Decoder {
@@ -206,18 +240,8 @@ private:
             case 130: {
                 const KnotVector kv = knot_vector(r);
                 const bool rat = r.i16() != 0;
-                const std::size_t np = kv.poles();
                 p.push_back(3);
-                p.push_back(double(kv.degree));
-                std::vector<double> knots;
-                for (std::size_t i = 0; i < kv.knots.size(); ++i)
-                    for (int m = 0; m < kv.mults[i]; ++m) knots.push_back(kv.knots[i]);
-                p.push_back(double(knots.size()));
-                p.insert(p.end(), knots.begin(), knots.end());
-                p.push_back(double(np));
-                p.push_back(rat ? 1.0 : 0.0);
-                for (std::size_t i = 0; i < 3 * np; ++i) p.push_back(r.f64());
-                if (rat) for (std::size_t i = 0; i < np; ++i) p.push_back(r.f64());
+                bspline(r, kv, 3, rat, p);
                 return;
             }
             default: throw DecodeError(ErrorCode::Unsupported, "revolution profile of class " + std::to_string(o.type), o.at);
@@ -305,31 +329,19 @@ private:
                 profile(first(o), sf.p);
                 break;
             }
-            case 216: {
+            case 216:
                 pending(o, "fillet");
                 sf.kind = SurfFillet;
-                const std::int32_t n = r.i32();
-                const KnotVector kv = knot_vector(r);
-                if (kv.degree != 5 || kv.knots.size() != std::size_t(n)) bad("fillet knot vector", o.at);
-                sf.p.push_back(double(n));
-                sf.p.insert(sf.p.end(), kv.knots.begin(), kv.knots.end());
-                vec(30 * n + 4);
+                sections(r, 10, o.at, sf.p);
                 break;
-            }
             case 243: case 251: {
-                // 251 takes the surface of its 243 (refs[0]) with the same parameters; its other
-                // reference is a guide p-curve (not needed for the shape)
+                // 251: its 243's surface and parameters (its other reference, a guide p-curve, is not needed)
                 pending(o, "ruled section surface");
                 const Obj& g = o.type == 251 ? obj(first(o)) : o;
                 if (g.type != 243) bad("ruled surface without its two-curve section record", o.at);
                 Rd q = rd(g);
                 sf.kind = SurfRuled;
-                const std::int32_t n = q.i32();
-                const KnotVector kv = knot_vector(q);
-                if (kv.degree != 5 || kv.knots.size() != std::size_t(n)) bad("two-curve section knot vector", g.at);
-                sf.p.push_back(double(n));
-                sf.p.insert(sf.p.end(), kv.knots.begin(), kv.knots.end());
-                for (int i = 0; i < 18 * n + 4; ++i) sf.p.push_back(q.f64());
+                sections(q, 6, g.at, sf.p);
                 break;
             }
             case 231: {
@@ -338,9 +350,7 @@ private:
                 const bool rat = r.i16() != 0;
                 const std::size_t nu = u.poles(), nv = v.poles();
                 sf.p = {double(u.degree), double(v.degree), double(nu), double(nv), rat ? 1.0 : 0.0};
-                for (const KnotVector* kv : {&u, &v})
-                    for (std::size_t i = 0; i < kv->knots.size(); ++i)
-                        for (int m = 0; m < kv->mults[i]; ++m) sf.p.push_back(kv->knots[i]);
+                for (const KnotVector* kv : {&u, &v}) for (double k : kv->expanded()) sf.p.push_back(k);
                 vec(int(3 * nu * nv));
                 if (rat) vec(int(nu * nv));
                 break;
@@ -414,17 +424,7 @@ private:
                 pending(o, "B-spline p-curve");
                 pc.kind = PcBSpline;
                 if (r.i16() != 0) bad("B-spline p-curve form", r.at + r.k);
-                const KnotVector kv = knot_vector(r);
-                const std::size_t np = kv.poles();
-                pc.p.push_back(double(kv.degree));
-                std::vector<double> knots;
-                for (std::size_t i = 0; i < kv.knots.size(); ++i)
-                    for (int m = 0; m < kv.mults[i]; ++m) knots.push_back(kv.knots[i]);
-                pc.p.push_back(double(knots.size()));
-                pc.p.insert(pc.p.end(), knots.begin(), knots.end());
-                pc.p.push_back(double(np));
-                pc.p.push_back(0.0);  // not rational
-                for (std::size_t i = 0; i < 2 * np; ++i) pc.p.push_back(r.f64());
+                bspline(r, knot_vector(r), 2, false, pc.p);
                 break;
             }
             default: throw DecodeError(ErrorCode::Unsupported, "p-curve type " + std::to_string(o.type), o.at);
