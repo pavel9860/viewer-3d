@@ -261,13 +261,18 @@ void point_derived(In& in, Out& o, Canonical& c, Ctx& cx, std::size_t at) {
     };
     const int c0 = cd >> 2 & 3;
     if (c0 == 3) bad("point parameter code 3", at);
-    const double q0 = c0 == 0 ? in.f64() : at_end(refs[0], c0);
+    // shared by refs 0 and 1 (bit 7): a derived value is the second curve's when the first's range is
+    // wider (an edge curve running a full period around its p-curve's range)
+    const bool shared = (cd & 0x80) && refs.size() > 1;
+    auto width = [&](std::uint32_t ref) { const auto& r = cx.curve_range(ref, at); return std::abs(r[1] - r[0]); };
+    const bool narrower = shared && c0 != 0 && cx.range.count(refs[0]) && cx.range.count(refs[1]) && width(refs[1]) + 1e-9 < width(refs[0]);
+    const double q0 = c0 == 0 ? in.f64() : at_end(narrower ? refs[1] : refs[0], c0);
     auto line_or_circle = [&](std::uint32_t ref) { const std::uint16_t t = cx.curve_type(ref); return t == 150 || t == 151; };
     std::int32_t span = 1;
     if (c0 == 0 && !line_or_circle(refs[0]) && !((cd & 0x80) && refs.size() > 1 && line_or_circle(refs[1]))) span = in.i32();
     qs.push_back({refs[0], q0});
     std::size_t next = 1;
-    if (cd & 0x80) { if (refs.size() > 1) qs.push_back({refs[1], c0 == 0 ? q0 : at_end(refs[1], c0)}); next = 2; }
+    if (cd & 0x80) { if (shared) qs.push_back({refs[1], c0 == 0 || narrower ? q0 : at_end(refs[1], c0)}); next = 2; }
     const int c1 = cd & 0x80 ? (cd & 3) : (cd >> 4 & 3);
     if (next < refs.size() && (c1 == 1 || c1 == 2) && cx.range.count(refs[next])) qs.push_back({refs[next], at_end(refs[next], c1)});
     in.k = in.b.size;
@@ -281,7 +286,7 @@ void point_derived(In& in, Out& o, Canonical& c, Ctx& cx, std::size_t at) {
 
 // 150 (2012+): ref, u8 f. Directions: bit 0 (0, 1), bit 1 (1, 0), bit 6 (0, -1), bit 7 (-1, 0), else
 // stored. +v / +u: [c, t0, t1], o = (c, 0) / (0, c); bit 4: c = box start of the other parameter;
-// bit 2: t0 = box start; bit 3: t1 = box end if t0 derived, else -t0. -v / -u: [t0, t1, o]; bit 2: t =
+// bit 2: t0 = box start; bit 3: t1 = box end. -v / -u: [t0, t1, o]; bit 2: t =
 // minus the box range; bit 3: t1 = -t0; bits 4 / 5: o = box start / end. General: [t0, t1, o, d];
 // bit 2: no range (the infinite default); bit 3: t1 = -t0.
 void line_derived(In& in, Out& o, std::uint32_t surface, Ctx& cx, std::uint32_t self, std::size_t at) {
@@ -293,7 +298,7 @@ void line_derived(In& in, Out& o, std::uint32_t surface, Ctx& cx, std::uint32_t 
         if (f & 0x20) throw DecodeError(ErrorCode::Unsupported, "line form " + std::to_string(f) + " not decoded", at);
         const double cc = f & 16 ? box()[vert ? 0 : 2] : in.f64();
         t0 = f & 4 ? box()[vert ? 2 : 0] : in.f64();
-        t1 = f & 8 ? (f & 4 ? box()[vert ? 3 : 1] : -t0) : in.f64();
+        t1 = f & 8 ? box()[vert ? 3 : 1] : in.f64();
         o0 = vert ? cc : 0; o1 = vert ? 0 : cc; d0 = vert ? 0 : 1; d1 = vert ? 1 : 0;
     } else if (f & 0xc0) {
         const bool vert = f & 64;

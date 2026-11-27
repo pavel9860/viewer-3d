@@ -257,6 +257,16 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   segment 1 was assumed: vertex parameters on Hermite curves fell outside their knots (part-2402: 627 of
   2,263 fillet line coedges; the kernel failed 546 faces there, 29 after). part-6141 and the Cap-EL
   parts' NURBS boundaries now lie in their knot ranges.
+- 2012+ lines along an axis (+u / +v): flag bit 3 means t1 = the surface box's end, also when t0 is
+  stored (not -t0, which left the box in 5,168 of 7,172 such lines).
+- 2012+ points whose refs 0 and 1 share the parameter (bit 7) with a derived start / end: when the
+  edge curve's range is wider than the p-curve's (a full period around it), the p-curve's range gives
+  the value (part-a340: half-turn faces had full-turn edges).
+- Kernel check (cadcli + kernel cgm, 144 2012+ parts whose result changed): failed faces 1,528 -> 903,
+  open edges 30,028 -> 17,359; one part slightly worse (part-3333: failed 11 -> 13, open 189 -> 186).
+  part-a340: failed 3 -> 0, open edges 31 -> 0, volume 49,707 vs stored 50,576; its area stays 1.74x
+  stored, nearly all on its 98 NURBS faces, whose meshes lie on the stored surface but cover it about
+  twice (trimming, open).
 - All newer kinds (4, 5, 9, 10, 11, 12) are emitted by default (kernel support, 2026-11-27); fillet
   edges meet within 1.3e-6 of the part diagonal (kernel BREP_DEBUG=gaps). Default: 479,480 -> 487,731 faces; no part loses faces.
 - Results (155 as IR p-curve kind 5, `--pending`): 488,806 -> 489,893 faces, 1,109 -> 1,141
