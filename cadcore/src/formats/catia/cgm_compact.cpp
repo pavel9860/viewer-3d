@@ -26,6 +26,16 @@ struct Ctx {
     std::unordered_map<std::uint32_t, std::uint16_t> type;
     std::unordered_map<std::uint32_t, Box> box;
     std::unordered_map<std::uint32_t, Range> range;
+    std::unordered_map<std::uint32_t, std::uint32_t> first;  // edge curve -> its first curve
+    std::uint16_t curve_type(std::uint32_t id) const {  // through edge curves
+        for (int d = 0; d < 8; ++d) {
+            auto f = first.find(id);
+            if (f == first.end()) break;
+            id = f->second;
+        }
+        auto t = type.find(id);
+        return t == type.end() ? 0 : t->second;
+    }
 
     template <class T>
     const T& get(const std::unordered_map<std::uint32_t, T>& m, std::uint32_t id, const char* what, const char* missing, std::size_t at) const {
@@ -233,11 +243,13 @@ void edge_curve_derived(In& in, Out& o, const std::vector<std::uint32_t>& refs, 
         wider = u != cx.edge_uses.end() && u->second == 1 && std::abs(f1 - f0) > std::abs(it->second[1] - it->second[0]) + 1e-9;
     }
     cx.range[self] = (infinite || wider) && it != cx.range.end() ? it->second : Range{f0, f1};
+    cx.first[self] = refs.at(0);
 }
 
-// 14 (2012+): refs, code byte; per ref a parameter: 2 start, 1 end of the curve's range, 0 stored f64.
-// refs[0] bits 2-3 (refs[1] too when bit 7); then refs[1] bits 4-5 or (bit 7) refs[2] bits 0-1. The
-// other refs' fields are not decoded (their parameters follow from the edge curve's maps).
+// 14 (2012+): refs, code byte; per ref a parameter: 2 start, 1 end of the curve's range, 0 stored f64
+// and, unless the curves sharing it include a line or circle, int segment. refs[0] bits 2-3 (refs[1] too when bit 7);
+// then refs[1] bits 4-5 or (bit 7) refs[2] bits 0-1. The other refs' fields are not decoded (their
+// parameters follow from the edge curve's maps).
 void point_derived(In& in, Out& o, Canonical& c, Ctx& cx, std::size_t at) {
     const auto refs = in.refs();
     if (refs.empty()) bad("point without curves", at);
@@ -250,6 +262,9 @@ void point_derived(In& in, Out& o, Canonical& c, Ctx& cx, std::size_t at) {
     const int c0 = cd >> 2 & 3;
     if (c0 == 3) bad("point parameter code 3", at);
     const double q0 = c0 == 0 ? in.f64() : at_end(refs[0], c0);
+    auto line_or_circle = [&](std::uint32_t ref) { const std::uint16_t t = cx.curve_type(ref); return t == 150 || t == 151; };
+    std::int32_t span = 1;
+    if (c0 == 0 && !line_or_circle(refs[0]) && !((cd & 0x80) && refs.size() > 1 && line_or_circle(refs[1]))) span = in.i32();
     qs.push_back({refs[0], q0});
     std::size_t next = 1;
     if (cd & 0x80) { if (refs.size() > 1) qs.push_back({refs[1], c0 == 0 ? q0 : at_end(refs[1], c0)}); next = 2; }
@@ -257,7 +272,11 @@ void point_derived(In& in, Out& o, Canonical& c, Ctx& cx, std::size_t at) {
     if (next < refs.size() && (c1 == 1 || c1 == 2) && cx.range.count(refs[next])) qs.push_back({refs[next], at_end(refs[next], c1)});
     in.k = in.b.size;
     o.count(std::uint32_t(qs.size()));
-    for (const auto& [ref, q] : qs) { c.refs.push_back(ref); o.f64(q); o.i32(1); }
+    for (std::size_t i = 0; i < qs.size(); ++i) {
+        c.refs.push_back(qs[i].first);
+        o.f64(qs[i].second);
+        o.i32(i < ((cd & 0x80) ? 2u : 1u) ? span : 1);
+    }
 }
 
 // 150 (2012+): ref, u8 f. Directions: bit 0 (0, 1), bit 1 (1, 0), bit 6 (0, -1), bit 7 (-1, 0), else

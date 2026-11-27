@@ -1,16 +1,9 @@
-# Pending IR kinds (cadcore → kernel)
+# Newer IR kinds (cadcore -> kernel)
 
-These kinds are decoded by cadcore, but the kernel's IR reader (`kernel/brep/src/cgm.rs`, `surface()`) does
-not evaluate them yet. An unknown kind makes the kernel reject the whole IR file. To keep that from
-happening, cadcore emits these kinds only on request:
-
-- `cadcli cgm PART OUT.cgmir --pending`
-- `cgm::DecodeOptions::pending_kinds`
-
-Without the option, their faces stay in `skipped` with the reason "awaits kernel support".
-Once the kernel evaluates them, cadcore's default can flip.
-
-The IR layout is unchanged (CGMIR v2). Each surface is written as `kind, id, n, f64 p[n]`.
+cadcore emits p-curve kinds 4 and 5 and surface kinds 9, 11 and 12 by default. Kind 10 (fillet) is
+emitted only on request (`cadcli cgm PART OUT --pending`, `cgm::DecodeOptions::pending_kinds`); without
+it, its faces are skipped with "awaits kernel support". The IR layout is unchanged (CGMIR v2): each
+surface is `kind, id, n, f64 p[n]`.
 
 ## 9: revolution (CGM class 211)
 

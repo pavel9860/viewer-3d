@@ -299,7 +299,6 @@ private:
                 if (is_edge_curve(obj(prof).type)) prof = first(obj(prof));
                 if (const std::uint16_t t = obj(prof).type; t == 100 || t == 130) {
                     // a 3D curve profile (the revolution's profile forms 2, 3)
-                    pending(o, "extrusion of a 3D curve");
                     sf.kind = SurfExtrusionCurve;
                     vec(3);
                     profile(first(o), sf.p);
@@ -321,7 +320,6 @@ private:
             case 203: sf.kind = SurfSphere; vec(12); sf.p.push_back(r.f64()); break;
             case 204: sf.kind = SurfTorus; vec(14); break;
             case 211: {
-                pending(o, "revolution");
                 sf.kind = SurfRevolution;
                 vec(12);
                 r.k += 4 * 8 + 8;  // box, two ints
@@ -336,7 +334,6 @@ private:
                 break;
             case 243: case 251: {
                 // 251: its 243's surface and parameters (its other reference, a guide p-curve, is not needed)
-                pending(o, "ruled section surface");
                 const Obj& g = o.type == 251 ? obj(first(o)) : o;
                 if (g.type != 243) bad("ruled surface without its two-curve section record", o.at);
                 Rd q = rd(g);
@@ -412,7 +409,6 @@ private:
                 break;
             }
             case 155: {
-                pending(o, "expression p-curve");
                 pc.kind = PcExpr;
                 for (int i = 0; i < 4; ++i) pc.p.push_back(r.f64());
                 expr(r, pc.p, 0);
@@ -421,7 +417,6 @@ private:
                 break;
             }
             case 170: {
-                pending(o, "B-spline p-curve");
                 pc.kind = PcBSpline;
                 if (r.i16() != 0) bad("B-spline p-curve form", r.at + r.k);
                 bspline(r, knot_vector(r), 2, false, pc.p);

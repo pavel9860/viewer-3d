@@ -252,6 +252,13 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   16 Jack_Frame and 8 Kinematics edges meet within 3e-16, the other readings miss every one. On all
   35 parts, the 816 checkable edges on 155 curves meet their neighbours within 9.5e-6. Varint parts
   have no stored tessellation, so codes 2 and 3 rest on that consistency only.
+- 2012+ points (14) with a stored parameter (code 0) also store the int segment after it, unless the
+  curves sharing the parameter include a line or circle (all such records of the corpus fit). Before,
+  segment 1 was assumed: vertex parameters on Hermite curves fell outside their knots (part-2402: 627 of
+  2,263 fillet line coedges; the kernel failed 546 faces there, 29 after). part-6141 and the Cap-EL
+  parts' NURBS boundaries now lie in their knot ranges.
+- Kinds 4, 5, 9, 11, 12 are emitted by default (kernel support, 2026-11-27); 10 stays behind
+  `--pending`. Default: 479,480 -> 487,731 faces; no part loses faces.
 - Results (155 as IR p-curve kind 5, `--pending`): 488,806 -> 489,893 faces, 1,109 -> 1,141
   complete parts; default unchanged; no part loses faces.
 - Still open: 152 / code 26 (ellipse-like p-curve: c[2], angle, a, b, ..., t0 t1 s), codes 60 / 61 (surfaces

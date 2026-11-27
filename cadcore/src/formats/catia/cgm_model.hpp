@@ -44,9 +44,8 @@ enum SurfaceKind : std::uint32_t {
     SurfCone = 6,       // o[3] X[3] Y[3] Z[3] a r0 su p = o + (r0 + v cos a)(cos t X + sin t Y) + v sin a Z, t = u / su
     SurfExtrusion = 7,  // pcurve d[3]                 p = C(u) + v d, C: a p-curve on another surface
     SurfOffset = 8,     // base d                      p = base(u, v) + d unit(Su x Sv)
-    // emitted only with DecodeOptions::pending_kinds (research/cgm/KERNEL_SPEC.md):
     SurfRevolution = 9,       // o[3] X[3] Y[3] Z[3] k | profile   p = o + Rot_Z(v / k)(C(u) - o), X toward Y
-    SurfFillet = 10,          // n | knots[n] | S[n][10] | S'[n][10] | S''[n][10] | u0 u1 v0 v1
+    SurfFillet = 10,          // only with DecodeOptions::pending_kinds; n | knots[n] | S[n][10] | S'[n][10] | S''[n][10] | u0 u1 v0 v1
                               //   section S = (p1, p2, c, th), quintic Hermite in u;
                               //   p = c + (sin(th - f)(p1 - c) + sin f (p2 - c)) / sin th, f = th (v - v0) / (v1 - v0)
     SurfRuled = 11,           // n | knots[n] | S[n][6] | S'[n][6] | S''[n][6] | u0 u1 v0 v1
@@ -58,7 +57,6 @@ enum PCurveKind : std::uint32_t {
     PcLine = 1,     // o[2] d[2]           (u, v) = o + t d
     PcCircle = 2,   // c[2] r s            (u, v) = c + r (cos a, sin a), a = t / (r s)
     PcHermite = 3,  // n | knots[n] | P[2][n] | D1[2][n] | has2 | D2[2][n]   quintic (cubic without D2)
-    // pending:
     PcBSpline = 4,  // degree nk | knots[nk] | np rational | poles[np][2] | [weights]
     PcExpr = 5,     // t0 t1 a b | node(u) | node(v); node = code nvals vals nkids nodes, leaves read t:
                     //   1: v0 + v1 t + v2 t^2; 2: v3 + v0 cos(v1 - v2 t); 3: k0 / k1; 4: v0 k0 + v1 k1 + v2;
@@ -91,7 +89,7 @@ struct Ir {
 };
 
 struct DecodeOptions {
-    bool pending_kinds = false;  // emit the kinds the kernel does not evaluate yet
+    bool pending_kinds = false;  // emit SurfFillet (its carriers' parameters are not settled)
 };
 // The B-rep of a framed stream (varint dialect, or compact through cgm_compact.hpp). Faces whose
 // geometry or grammar is not decoded are left out and listed in `skipped` with the reason.

@@ -145,17 +145,20 @@ TEST_CASE("CGM corpus parts: faces per stored form") {
     }
 }
 
-// Pending kinds: absent by default (fewer faces), every face with them; `check` tests their parameters.
-struct PendingPart { const char* path; std::size_t faces, decoded, count = 0; };  // count: kind instances (0: some)
-void pending_kind(const PendingPart& pt, bool surface, std::uint32_t kind, const std::function<void(const cgm::Ir&, std::size_t)>& check) {
+// Newer kinds: `decoded` faces (SurfFillet only with pending kinds: absent without them); `check` tests
+// their parameters.
+struct KindPart { const char* path; std::size_t faces, decoded, count = 0; };  // count: kind instances (0: some)
+void kind_part(const KindPart& pt, bool surface, std::uint32_t kind, const std::function<void(const cgm::Ir&, std::size_t)>& check) {
     std::vector<std::uint8_t> keep;
     const auto st = stream(pt.path, keep);
     if (!st) return;
-    const cgm::Ir plain = decode(*st, false);
-    CHECK(plain.faces.size() < pt.decoded);
-    for (const auto& s : plain.surfaces) CHECK((!surface || s.kind != kind));
-    for (const auto& c : plain.pcurves) CHECK((surface || c.kind != kind));
-    const cgm::Ir ir = decode(*st, true);
+    const bool gated = surface && kind == cgm::SurfFillet;
+    if (gated) {
+        const cgm::Ir plain = decode(*st, false);
+        CHECK(plain.faces.size() < pt.decoded);
+        for (const auto& s : plain.surfaces) CHECK(s.kind != kind);
+    }
+    const cgm::Ir ir = decode(*st, gated);
     CHECK(ir.faces.size() == pt.decoded);
     CHECK(ir.faces.size() + ir.skipped.size() >= pt.faces);
     std::size_t n = 0;
@@ -165,11 +168,11 @@ void pending_kind(const PendingPart& pt, bool surface, std::uint32_t kind, const
     CHECK((pt.count ? n == pt.count : n > 0));
 }
 
-TEST_CASE("CGM pending surfaces: fillets (216), revolutions (211), ruled (243, 251)") {
+TEST_CASE("CGM surfaces: fillets (216, pending), revolutions (211), ruled (243, 251)") {
     const char* g = "caa/caadoc/CAAElecHarnessItf.edu/CNext/resources/graphic/";
     const std::string plug = std::string(g) + "CAA_EhiFLEXComputeBundleSegment_Sample/plug.CATPart";
     const std::string dryer = std::string(g) + "CAA_EHIMultiSegmentSample/hair-dryer.CATPart";
-    pending_kind({plug.c_str(), 571, 571, 28}, true, cgm::SurfFillet, [](const cgm::Ir& ir, std::size_t i) {
+    kind_part({plug.c_str(), 571, 571, 28}, true, cgm::SurfFillet, [](const cgm::Ir& ir, std::size_t i) {
         const auto& p = ir.surfaces[i].p;
         const std::size_t k = std::size_t(p.at(0));
         REQUIRE(p.size() == 1 + 31 * k + 4);
@@ -177,7 +180,7 @@ TEST_CASE("CGM pending surfaces: fillets (216), revolutions (211), ruled (243, 2
         auto d = [&](int a) { double t = 0; for (int j = 0; j < 3; ++j) { const double x = p[1 + k + a + j] - p[1 + k + 6 + j]; t += x * x; } return t; };
         CHECK(std::abs(d(0) - d(3)) < 1e-9 * (1 + d(0)));
     });
-    pending_kind({dryer.c_str(), 65, 65, 6}, true, cgm::SurfRevolution, [](const cgm::Ir& ir, std::size_t i) {
+    kind_part({dryer.c_str(), 65, 65, 6}, true, cgm::SurfRevolution, [](const cgm::Ir& ir, std::size_t i) {
         const auto& p = ir.surfaces[i].p;
         REQUIRE(p.size() >= 15);
         CHECK((p[13] >= 1 && p[13] <= 3));
@@ -189,13 +192,13 @@ TEST_CASE("CGM pending surfaces: fillets (216), revolutions (211), ruled (243, 2
         CHECK(p[1] == p[1 + 19 * k]);          // u0 is the first knot
         CHECK(p[2 + 19 * k] > p[1 + 19 * k]);
     };
-    for (const PendingPart& pt : {PendingPart{"local/5f11d4d4", 39, 39},
-                                  PendingPart{"local/04190b04", 717, 716},
-                                  PendingPart{"caa/caadoc/Doc/online/CAAScdStrUseCases/samples/EditCutout/Plate_0053.CATPart", 20, 20}})
-        pending_kind(pt, true, cgm::SurfRuled, ruled);
+    for (const KindPart& pt : {KindPart{"local/5f11d4d4", 39, 39},
+                                  KindPart{"local/04190b04", 717, 716},
+                                  KindPart{"caa/caadoc/Doc/online/CAAScdStrUseCases/samples/EditCutout/Plate_0053.CATPart", 20, 20}})
+        kind_part(pt, true, cgm::SurfRuled, ruled);
 }
 
-TEST_CASE("CGM pending p-curves: B-splines (170), expressions (155)") {
+TEST_CASE("CGM p-curves: B-splines (170), expressions (155)") {
     // B-spline coedge ranges lie in their knot ranges (vertex parameters are offsets within a knot
     // segment, the first segment starting at the first knot)
     auto bspline = [](const cgm::Ir& ir, std::size_t i) {
@@ -210,10 +213,10 @@ TEST_CASE("CGM pending p-curves: B-splines (170), expressions (155)") {
                 CHECK(std::max(ce.t0, ce.t1) <= hi + tol);
             }
     };
-    for (const PendingPart& pt : {PendingPart{"local/d04dc2b9", 299, 299},
-                                  PendingPart{"local/5838914f", 507, 507},
-                                  PendingPart{"github/catia-v5/Guilherme115__Motor-V6/05_Admissao_Escape/Duto.CATPart", 379, 379}})
-        pending_kind(pt, false, cgm::PcBSpline, bspline);
+    for (const KindPart& pt : {KindPart{"local/d04dc2b9", 299, 299},
+                                  KindPart{"local/5838914f", 507, 507},
+                                  KindPart{"github/catia-v5/Guilherme115__Motor-V6/05_Admissao_Escape/Duto.CATPart", 379, 379}})
+        kind_part(pt, false, cgm::PcBSpline, bspline);
     // expression trees: two well-formed trees after the 4 head values
     auto expr = [](const cgm::Ir& ir, std::size_t i) {
         const auto& p = ir.pcurves[i].p;
@@ -231,10 +234,10 @@ TEST_CASE("CGM pending p-curves: B-splines (170), expressions (155)") {
         node();
         CHECK(k == p.size());
     };
-    for (const PendingPart& pt : {PendingPart{"caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Jack_Frame.CATPart", 216, 216},
-                                  PendingPart{"local/703cd616", 3872, 3872},
-                                  PendingPart{"local/b33cd8bf", 328, 328}})
-        pending_kind(pt, false, cgm::PcExpr, expr);
+    for (const KindPart& pt : {KindPart{"caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Jack_Frame.CATPart", 216, 216},
+                                  KindPart{"local/703cd616", 3872, 3640},
+                                  KindPart{"local/b33cd8bf", 328, 328}})
+        kind_part(pt, false, cgm::PcExpr, expr);
 }
 
 TEST_CASE("CGM points: parameters are offsets within a Hermite segment") {
