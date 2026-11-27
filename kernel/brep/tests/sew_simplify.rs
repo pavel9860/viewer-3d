@@ -42,7 +42,7 @@ fn explode(b: &Body, jitter: f64) -> Body {
 fn volume(m: &Mesh) -> f64 { m.tri.iter().map(|t| dot(m.pos[t[0] as usize], cross(m.pos[t[1] as usize], m.pos[t[2] as usize])) / 6.0).sum() }
 
 fn mesh_all(b: &Body) -> Mesh {
-    let faces: Vec<Id<Face>> = b.shells.iter().flat_map(|(_, s)| s.faces.clone()).collect();
+    let faces: Vec<Id<Face>> = b.shell_faces().collect();
     tessellate(b, &faces, &Opts { chord: 1e-3, ..Default::default() }, 2).0
 }
 

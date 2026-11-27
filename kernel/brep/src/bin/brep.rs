@@ -1,9 +1,9 @@
 //! brep CLI.
 //!   brep check FILE.stp|LIST.tsv          import + validate
 //!   brep bool FILE.stp|LIST.tsv [SHELLS]  booleans of the largest closed shells with a cylinder through them
-//!   brep mesh FILE.stp|LIST.tsv [CHORD] [--out DIR]   watertight tessellation (chord relative to the model diagonal,
-//!                                         default 1e-3); open shells are sewn first; --out writes DIR/<name>.mesh with detail levels and
-//!                                         DIR/index.json for web/mesh.html
+//!   brep mesh FILE.stp|LIST.tsv [CHORD] [--out DIR]
+//!       sew open shells, tessellate (chord relative to the model diagonal, default 1e-3); --out writes
+//!       DIR/<name>.mesh with detail levels and DIR/index.json for the web viewer
 use brep::boolean::{boolean, Op};
 use brep::geom::*;
 use brep::topo::*;
@@ -12,10 +12,12 @@ use std::time::Instant;
 
 const WORKERS: usize = 4;
 fn ms(t: Instant) -> f64 { t.elapsed().as_secs_f64() * 1e3 }
+fn base(f: &str) -> &str { f.rsplit('/').next().unwrap() }
+fn import(f: &str) -> Option<step::Import> { step::import(f).map_err(|e| println!("{f}: {e}")).ok() }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 { eprintln!("usage: brep check|bool FILE.stp|LIST.tsv [SHELLS]"); std::process::exit(2); }
+    if args.len() < 3 { eprintln!("usage: brep check|bool|mesh FILE.stp|LIST.tsv [SHELLS|CHORD] [--out DIR]"); std::process::exit(2); }
     let files: Vec<String> = if args[2].ends_with(".tsv") { std::fs::read_to_string(&args[2]).unwrap().lines().filter(|l| !l.is_empty()).map(|l| l.rsplit('\t').next().unwrap().to_string()).collect() } else { vec![args[2].clone()] };
     let bad = match args[1].as_str() {
         "check" => files.iter().map(|f| check_file(f)).sum::<usize>(),
@@ -32,13 +34,13 @@ fn main() {
 
 fn check_file(f: &str) -> usize {
     let t0 = Instant::now();
-    let im = match step::import(f) { Ok(i) => i, Err(e) => { println!("{f}: {e}"); return 1 } };
+    let Some(im) = import(f) else { return 1 };
     let ti = ms(t0);
     let t1 = Instant::now();
     let r = check::check(&im.body, 7, WORKERS);
     let mm = |x: f64| x * im.diag;
     println!("{:<26} {} | import {ti:.0} ms, check {:.0} ms | violations {} (open loops {}, edge use {}, orientation {}, vertex off curve {}, edge off surface {}) | non-manifold {} | max dev vertex {:.1e} mm edge {:.1e} mm | no curve {} | unsupported {:?}",
-        f.rsplit('/').next().unwrap(), im.body.stats(), ms(t1), r.violations(), r.loops_open, r.edge_use, r.orientation, r.vertex_off_curve, r.edge_off_surface, r.nonmanifold, mm(r.max_vertex_dev), mm(r.max_edge_dev), r.edges_without_curve, im.unsupported);
+        base(f), im.body.stats(), ms(t1), r.violations(), r.loops_open, r.edge_use, r.orientation, r.vertex_off_curve, r.edge_off_surface, r.nonmanifold, mm(r.max_vertex_dev), mm(r.max_edge_dev), r.edges_without_curve, im.unsupported);
     r.violations()
 }
 
@@ -46,7 +48,7 @@ fn check_file(f: &str) -> usize {
 /// No ground truth: checks are the validator, arrangement health and the volume identities
 /// V(A-B) + V(A^B) = V(A) and V(AuB) = V(A) + V(B) - V(A^B).
 fn bool_file(f: &str, n: usize) -> usize {
-    let im = match step::import(f) { Ok(i) => i, Err(e) => { println!("{f}: {e}"); return 1 } };
+    let Some(im) = import(f) else { return 1 };
     let b = &im.body;
     let mut shells: Vec<&Shell> = b.shells.iter().map(|x| x.1).filter(|s| s.closed).collect();
     shells.sort_by_key(|s| std::cmp::Reverse(s.faces.len()));
@@ -62,7 +64,7 @@ fn bool_file(f: &str, n: usize) -> usize {
         let (va, ba) = vol(&a);
         let vb = vol(&cyl).0;
         let mut v = [0.0; 3];
-        let mut line = format!("{:<26} shell {si} ({} faces) V(A) {va:.4e}{}", f.rsplit('/').next().unwrap(), sh.faces.len(), if ba > 0 { format!(" [{ba} faces lost area]") } else { String::new() });
+        let mut line = format!("{:<26} shell {si} ({} faces) V(A) {va:.4e}{}", base(f), sh.faces.len(), if ba > 0 { format!(" [{ba} faces lost area]") } else { String::new() });
         for (k, op) in [Op::Difference, Op::Intersection, Op::Union].into_iter().enumerate() {
             let t0 = Instant::now();
             let (res, st) = boolean(&a, &cyl, op, WORKERS);
@@ -70,7 +72,7 @@ fn bool_file(f: &str, n: usize) -> usize {
             let rep = check::check(&res, 5, WORKERS);
             let (vr, br) = vol(&res);
             v[k] = vr;
-            if std::env::var("BREP_DEBUG").is_ok() && rep.edge_use > 0 { unmatched(&res, &a, &sh.faces, b); }
+            if brep::debug("check") && rep.edge_use > 0 { unmatched(&res, &a, &sh.faces, b); }
             let fail = st.dangling + st.on + rep.violations() + br;
             bad += fail;
             line += &format!(" | {op:?} {} faces {t:.0} ms{}", res.faces.len(), if fail > 0 { format!(" FAIL dangling {} on {} violations {} (open {}, use {}, orient {}, vtx {}, edge {}) lost-area {br}", st.dangling, st.on, rep.violations(), rep.loops_open, rep.edge_use, rep.orientation, rep.vertex_off_curve, rep.edge_off_surface) } else { String::new() });
@@ -85,7 +87,7 @@ fn bool_file(f: &str, n: usize) -> usize {
 /// debug: closed-shell edges with unbalanced use, with the STEP ids of the faces they came from
 fn unmatched(r: &Body, a: &Body, shell: &[Id<Face>], src: &Body) {
     let mut uses: std::collections::HashMap<Id<Edge>, Vec<(u32, bool)>> = Default::default();
-    for (fid, f) in r.faces.iter() { for &l in &f.loops { for &c in &r.loops.get(l).coedges { let ce = r.coedges.get(c); uses.entry(ce.edge).or_default().push((fid.0, ce.sense)); } } }
+    for (fid, _) in r.faces.iter() { for ce in r.face_coedges(fid) { uses.entry(ce.edge).or_default().push((fid.0, ce.sense)); } }
     let step_of = |wf: u32| if (wf as usize) < a.faces.len() { format!("A#{}", src.faces.get(shell[wf as usize]).origin.src) } else { format!("B{}", wf as usize - a.faces.len()) };
     for (e, u) in uses { let f = u.iter().filter(|x| x.1).count(); if 2 * f != u.len() {
         let ed = r.edges.get(e);
@@ -97,9 +99,7 @@ fn unmatched(r: &Body, a: &Body, shell: &[Id<Face>], src: &Body) {
 /// tessellate every shell; closed shells must give closed meshes. Volume vs the exact face integral is an indicator.
 fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
     use brep::tess::{mesh_volume, open_edges, tessellate, Opts};
-    let im = match step::import(f) { Ok(i) => i, Err(e) => { println!("{f}: {e}"); return 1 } };
-    let mut im = im;
-    // open shells are sewn at the file's own length tolerance
+    let Some(mut im) = import(f) else { return 1 };
     let tol = im.body.tol;
     let sewn = brep::sew::sew(&mut im.body, tol);
     let sew_note = if sewn.free_before > 0 {
@@ -125,18 +125,7 @@ fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
         dev = dev.max(st.max_dev);
         if sh.closed {
             let (op, nm) = open_edges(&m);
-            if nm > 0 && std::env::var("BREP_DEBUG").is_ok() {
-                let mut u: std::collections::HashMap<(u32, u32), Vec<u32>> = Default::default();
-                for (i, t) in m.tri.iter().enumerate() { for k in 0..3 { let (a, c) = (t[k], t[(k + 1) % 3]); u.entry((a.min(c), a.max(c))).or_default().push(b.faces.get(sh.faces[m.face[i] as usize]).origin.src); } }
-                for (e, f) in u.iter().filter(|x| x.1.len() > 2) { eprintln!("  non-manifold mesh edge {:?} -> {:?} faces STEP {f:?}", m.pos[e.0 as usize], m.pos[e.1 as usize]); }
-            }
-            if op > 0 && std::env::var("BREP_DEBUG").is_ok() {
-                let mut d: std::collections::HashMap<(u32, u32), Vec<u32>> = Default::default();
-                for (i, t) in m.tri.iter().enumerate() { for k in 0..3 { d.entry((t[k], t[(k + 1) % 3])).or_default().push(m.face[i]); } }
-                let mut fs: std::collections::BTreeMap<u32, usize> = Default::default();
-                for (e, f) in &d { if !d.contains_key(&(e.1, e.0)) { for x in f { *fs.entry(b.faces.get(sh.faces[*x as usize]).origin.src).or_default() += 1; } } }
-                eprintln!("  open edges by face (STEP id: count): {fs:?}");
-            }
+            if op + nm > 0 && brep::debug("check") { mesh_defects(b, &sh.faces, &m); }
             open += op;
             nonman += nm;
             let (v, _) = mesh::volume(b, &sh.faces);
@@ -148,24 +137,36 @@ fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
     let t = ms(t0);
     let mut lods = String::new();
     if let Some(dir) = out {
-        // detail levels for the viewer: tolerances from a quarter of the chord, doubling; each level's error is its
-        // measured deviation from this mesh (whose own deviation from the exact model is the chord)
+        // tolerances from a quarter of the chord, doubling
         let t1 = Instant::now();
         let tols: Vec<f64> = (0..10).map(|k| 0.25 * chord * (1u64 << k) as f64).collect();
         let lv = brep::simplify::levels(&all.pos, &all.tri, &all.face, &tols, WORKERS);
         lods = format!(" | levels {} in {:.0} ms", lv.iter().map(|l| format!("{}@{:.1e}", l.tri.len(), l.err)).collect::<Vec<_>>().join(" "), ms(t1));
-        write_mesh(dir, f.rsplit('/').next().unwrap(), &all, chord, &lv, im.diag);
+        write_mesh(dir, base(f), &all, chord, &lv, im.diag);
     }
     let bad = open + empty + coarse;
     println!("{:<26} {} faces -> {tris} triangles in {t:.0} ms | open edges {open} non-manifold {nonman} | empty faces {empty} coarse {coarse} | max dev {:.1e} mm | volume mesh/exact {:.6} (worst shell rel {vrel:.1e}){sew_note}{lods}{}",
-        f.rsplit('/').next().unwrap(), b.faces.len(), dev * im.diag, mv / ev, if bad > 0 { " FAIL" } else { "" });
+        base(f), b.faces.len(), dev * im.diag, mv / ev, if bad > 0 { " FAIL" } else { "" });
     bad
 }
 
-/// little-endian: u32 vertex count, u32 triangle count, f32 xyz per vertex (model units), u32 x3 per triangle,
-/// u32 face id per triangle; then the detail levels: "LODS", f32 chord of the mesh above (its deviation from the exact
-/// model), u32 level count, and per level f32 error (largest measured deviation from the mesh above), then the same
-/// block as the mesh (counts, positions, triangles, face ids). Both are in model units, like the positions. DIR/index.json lists the files.
+/// debug: non-manifold mesh edges and open mesh edges by face (STEP ids)
+fn mesh_defects(b: &Body, faces: &[Id<Face>], m: &brep::tess::Mesh) {
+    let src = |i: usize| b.faces.get(faces[m.face[i] as usize]).origin.src;
+    let mut d: std::collections::HashMap<(u32, u32), Vec<usize>> = Default::default();
+    for (i, t) in m.tri.iter().enumerate() { for k in 0..3 { d.entry((t[k], t[(k + 1) % 3])).or_default().push(i); } }
+    let mut open: std::collections::BTreeMap<u32, usize> = Default::default();
+    for (e, ts) in &d {
+        let back = d.get(&(e.1, e.0)).map_or(0, |x| x.len());
+        if back == 0 { for &i in ts { *open.entry(src(i)).or_default() += 1; } }
+        if e.0 < e.1 && ts.len() + back > 2 { eprintln!("  non-manifold mesh edge {:?} -> {:?} faces STEP {:?}", m.pos[e.0 as usize], m.pos[e.1 as usize], ts.iter().chain(d.get(&(e.1, e.0)).into_iter().flatten()).map(|&i| src(i)).collect::<Vec<_>>()); }
+    }
+    if !open.is_empty() { eprintln!("  open edges by face (STEP id: count): {open:?}"); }
+}
+
+/// little-endian block: u32 vertex count, u32 triangle count, f32 xyz per vertex, u32 x3 per triangle, u32 face id
+/// per triangle; then "LODS", f32 chord (deviation of the mesh from the exact model), u32 level count, and per level
+/// f32 error (measured deviation from the mesh) and a block. Lengths in mm. DIR/index.json lists the files.
 fn write_mesh(dir: &str, name: &str, m: &brep::tess::Mesh, err: f64, lv: &[brep::simplify::Level], scale: f64) {
     std::fs::create_dir_all(dir).unwrap();
     let mut b: Vec<u8> = vec![];

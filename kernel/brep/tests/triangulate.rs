@@ -21,7 +21,7 @@ fn check(name: &str) {
         let o = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| brep::exact::orient2d(p, q, r).0;
         o(*a, *b, *c) * o(*a, *b, *d) < 0 && o(*c, *d, *a) * o(*c, *d, *b) < 0
     })).count();
-    if std::env::var("TRI_DEBUG").is_ok() {
+    if brep::debug("tri") {
         for t in &tris { for k in 0..3 { let (a, b) = (pts[t[k]], pts[t[(k + 1) % 3]]); for (c, d) in &rings {
             let o = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| brep::exact::orient2d(p, q, r).0;
             if o(a, b, *c) * o(a, b, *d) < 0 && o(*c, *d, a) * o(*c, *d, b) < 0 { eprintln!("triangle {:?} edge {a:?}-{b:?} crosses ring edge {c:?}-{d:?}", t); }

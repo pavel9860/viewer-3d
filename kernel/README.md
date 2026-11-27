@@ -42,6 +42,7 @@ python3 -I tools/export_parts.py samples/catia DATA ../cadcore/build/cadcli "ASS
 ./target/release/spike real DATA                   # real data; writes DATA/parts.bin/.idx for the web page
 wasm/build.sh && cp DATA/parts.* web/              # then serve web/ (python3 -I web/serve.py) and open it
 ./target/release/brep mesh spike/catia_steps.tsv --out web/meshes   # meshes for mesh.html / render_test.html / bench.html (needs k.wasm)
+BREP_DEBUG=sew,tess ./target/release/brep mesh FILE.stp            # diagnostics: BREP_DEBUG=1 (all) or topics check,bool,time,mesh,tess,sew,orient,open,tri
 ```
 
 Status (2026-11-25): booleans (A-B, A^B, AuB of each file's largest shell with a cylinder) pass on all 15 CATIA STEP files: 0 checker violations, no dangling cuts, volume identities <= 1.5e-5, 25 ms - 2.6 s per operation, 39 s for all; brep import + check of 15 CATIA STEP files (83k edges, 13.9k faces): 0 violations; SSI 7/7, stress 600/600, booleans 7/7 (closed shells, volume error <= 1.6e-5), STEP edges

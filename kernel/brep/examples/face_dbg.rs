@@ -5,9 +5,9 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let im = step::import(&a[1]).unwrap();
     let id: u32 = a[2].parse().unwrap();
-    let (_, fc) = im.body.faces.iter().find(|(_, f)| f.origin.src == id).unwrap();
+    let (fid, fc) = im.body.faces.iter().find(|(_, f)| f.origin.src == id).unwrap();
     let sag: f64 = a.get(3).and_then(|x| x.parse().ok()).unwrap_or(brep::trim::SAG);
-    let loops: Vec<Vec<_>> = fc.loops.iter().map(|&l| im.body.loops.get(l).coedges.iter().map(|&c| { let ce = im.body.coedges.get(c); (ce.edge, ce.sense) }).collect()).collect();
+    let loops: Vec<Vec<_>> = im.body.face_loops(fid);
     let t = brep::trim::Trim::with_sag(&im.body, fc.surface.as_ref(), fc.sense, &loops, sag);
     let rings: Vec<Vec<[f64; 2]>> = t.polygons().to_vec();
     let (pts, tris) = brep::tri::triangulate(&rings);

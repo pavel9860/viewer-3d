@@ -165,7 +165,7 @@ fn pair_pieces(w: &Body, trims: &[Trim], weld: f64, fa: Id<Face>, fb: Id<Face>) 
     let (wa, wb) = (window(sa, &trims[fa.ix()]), window(sb, &trims[fb.ix()]));
     let t0 = std::time::Instant::now();
     let curves = intersect(&wa, &wb).0;
-    if std::env::var("BREP_TIME").is_ok() && t0.elapsed().as_secs_f64() > 0.5 { eprintln!("  ssi {:.1} s, {} curves", t0.elapsed().as_secs_f64(), curves.len()); }
+    if crate::debug("time") && t0.elapsed().as_secs_f64() > 0.5 { eprintln!("  ssi {:.1} s, {} curves", t0.elapsed().as_secs_f64(), curves.len()); }
     let out = restrict(w, trims, weld, fa, fb, curves);
     out
 }
@@ -278,7 +278,7 @@ fn arrange(w: &Body, s: &dyn Surf, tr: &Trim, cuts: &[Id<Edge>]) -> (Vec<Region>
     let ang: Vec<f64> = (0..nh).map(angle).collect();
     for l in out.iter_mut() { l.sort_by(|&a, &b| ang[a].total_cmp(&ang[b])); }
     let dangling = out.iter().filter(|l| l.len() == 1).count();
-    if dangling > 0 && std::env::var("BREP_DEBUG").is_ok() {
+    if dangling > 0 && crate::debug("bool") {
         for (n, l) in out.iter().enumerate().filter(|(_, l)| l.len() == 1).take(6) {
             let h = l[0];
             let same_v: Vec<(usize, P2)> = nodes.iter().enumerate().filter(|(_, x)| x.0 == nodes[n].0).map(|(i, x)| (i, x.1)).collect();
@@ -367,7 +367,7 @@ fn loops_of(w: &Body, f: Id<Face>, split: &HashMap<Id<Edge>, Vec<Id<Edge>>>) -> 
 pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
     let mut st = Stats::default();
     let clock = std::time::Instant::now();
-    let lap = |what: &str| if std::env::var("BREP_TIME").is_ok() { eprintln!("  {what}: {:.0} ms", clock.elapsed().as_secs_f64() * 1e3); };
+    let lap = |what: &str| if crate::debug("time") { eprintln!("  {what}: {:.0} ms", clock.elapsed().as_secs_f64() * 1e3); };
     let mut w = a.clone();
     w.tol = a.tol.max(b.tol);
     let boff = append(&mut w, b);
@@ -385,7 +385,7 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
         let t0 = std::time::Instant::now();
         let r = pair_pieces(&w, &trims, weld_tol, pairs[i].0, pairs[i].1);
         let dt = t0.elapsed().as_secs_f64();
-        if dt > 0.5 && std::env::var("BREP_TIME").is_ok() { eprintln!("  slow pair: faces src {} x {}: {dt:.1} s, {} pieces", w.faces.get(pairs[i].0).origin.src, w.faces.get(pairs[i].1).origin.src, r.len()); }
+        if dt > 0.5 && crate::debug("time") { eprintln!("  slow pair: faces src {} x {}: {dt:.1} s, {} pieces", w.faces.get(pairs[i].0).origin.src, w.faces.get(pairs[i].1).origin.src, r.len()); }
         r
     }).into_iter().flatten().collect();
     st.pieces = pieces.len();
@@ -422,7 +422,7 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
     if let Ok(v) = std::env::var("BREP_V") {
         let v: u32 = v.parse().unwrap();
         let mut ef: HashMap<Id<Edge>, Vec<u32>> = HashMap::new();
-        for &f in &faces { for &l in &w.faces.get(f).loops { for &c in &w.loops.get(l).coedges { ef.entry(w.coedges.get(c).edge).or_default().push(w.faces.get(f).origin.src); } } }
+        for &f in &faces { for ce in w.face_coedges(f) { ef.entry(ce.edge).or_default().push(w.faces.get(f).origin.src); } }
         for (e, sp) in &splits { if sp.iter().any(|x| x.1 .0 == v) { eprintln!("vertex {v}: on edge {e:?} (STEP #{}) of faces STEP {:?}", w.edges.get(*e).origin.src, ef.get(e)); } }
         for (pc, pv) in pieces.iter().zip(&pverts) { if pv.iter().any(|x| x.map_or(false, |x| x.0 == v)) { eprintln!("vertex {v}: piece of faces STEP {} x {} ({} pts) vertices {:?} len {:.3e}", w.faces.get(pc.f[0]).origin.src, w.faces.get(pc.f[1]).origin.src, pc.pts.len(), pv.iter().flatten().collect::<Vec<_>>(), pc.pts.windows(2).map(|q| norm(sub(q[1], q[0]))).sum::<f64>()); } }
     }
@@ -490,7 +490,7 @@ pub fn boolean(a: &Body, b: &Body, op: Op, workers: usize) -> (Body, Stats) {
     // per face: arrangement, classification against the other body, selection
     for (i, &f) in faces.iter().enumerate() { loops0[i] = loops_of(&w, f, &split); }
     let (sol_a, sol_b) = (Solid::new(&w, &fa), Solid::new(&w, &fb));
-    let debug = std::env::var("BREP_DEBUG").is_ok();
+    let debug = crate::debug("bool");
     let res: Vec<(Vec<(Region, bool)>, usize, usize, usize)> = par::map(faces.len(), workers, |i| {
         let f = faces[i];
         let fc = w.faces.get(f);

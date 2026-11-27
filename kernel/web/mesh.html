@@ -17,8 +17,7 @@
 </div>
 <script type="module">
 import { prepare, camera, createLodRenderer } from './raster.js';
-// Minimal WebGL viewer for `brep mesh --out web/meshes` files (u32 nv, u32 nt, f32 xyz*nv, u32 3*nt, u32 face*nt).
-// Flat shading per triangle, one colour per B-rep face, optional triangle edges.
+// Viewer for `brep mesh --out` files: flat shading, one colour per B-rep face, optional triangle edges.
 const cv = document.getElementById('c');
 // WebGL 2, else WebGL 1 (same GLSL 100 shaders, no vertex array objects), else the CPU renderer (raster.js)
 const gl = cv.getContext('webgl2', { antialias: true }) || cv.getContext('webgl', { antialias: true }) || null;
@@ -38,38 +37,26 @@ if (gl) {
 const U = n => gl.getUniformLocation(prog, n);
 let mesh = null, rot = [0.6, -0.5], pan = [0, 0], dist = 2.5;
 
-function hue(i) { const h = (i * 0.61803398875) % 1, s = 0.45, v = 0.9; const k = n => (n + h * 6) % 6; const f = n => v - v * s * Math.max(0, Math.min(k(n), 4 - k(n), 1)); return [f(5), f(3), f(1)]; }
-
 async function load(name) {
-  const b = await (await fetch('meshes/' + name)).arrayBuffer(), dv = new DataView(b);
+  const m = prepare(await (await fetch('meshes/' + name)).arrayBuffer());
+  const head = `${name}: ${m.nv} vertices, ${m.nt} triangles, ${new Set(m.F).size} faces`;
   if (!gl) {
-    const m = prepare(b), r = await createLodRenderer(m);
-    soft = r; mesh = {};
-    infoText = `${name}: ${m.nv} vertices, ${m.nt} triangles, ${new Set(m.F).size} faces, ${m.levels.length - 1} detail levels · ${glName}, ${r.threads} threads`;
+    soft = await createLodRenderer(m); mesh = {};
+    infoText = `${head}, ${m.levels.length - 1} detail levels · ${glName}, ${soft.threads} threads`;
     draw();
     return;
   }
-  const nv = dv.getUint32(0, true), nt = dv.getUint32(4, true);
-  const P = new Float32Array(b, 8, nv * 3), T = new Uint32Array(b, 8 + nv * 12, nt * 3), F = new Uint32Array(b, 8 + nv * 12 + nt * 12, nt);
   // unindexed flat-shaded triangles; edges as lines
+  const { nt, V, T, N, C } = m;
   const pos = new Float32Array(nt * 9), nor = new Float32Array(nt * 9), col = new Float32Array(nt * 9), lines = new Float32Array(nt * 18);
-  let lo = [1e30, 1e30, 1e30], hi = [-1e30, -1e30, -1e30];
-  for (let i = 0; i < nv; i++) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], P[3 * i + k]); hi[k] = Math.max(hi[k], P[3 * i + k]); }
-  const c = lo.map((x, k) => (x + hi[k]) / 2), s = 2 / Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
-  const v = i => [0, 1, 2].map(k => (P[3 * i + k] - c[k]) * s);
   for (let t = 0; t < nt; t++) {
-    const a = v(T[3 * t]), b2 = v(T[3 * t + 1]), d = v(T[3 * t + 2]);
-    const u = [b2[0] - a[0], b2[1] - a[1], b2[2] - a[2]], w = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
-    const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]], l = Math.hypot(...n) || 1;
-    const cc = hue(F[t]);
-    [a, b2, d].forEach((p, j) => { pos.set(p, 9 * t + 3 * j); nor.set(n.map(x => x / l), 9 * t + 3 * j); col.set(cc, 9 * t + 3 * j); });
-    [a, b2, b2, d, d, a].forEach((p, j) => lines.set(p, 18 * t + 3 * j));
+    const p = [0, 1, 2].map(j => V.subarray(3 * T[3 * t + j], 3 * T[3 * t + j] + 3));
+    for (let j = 0; j < 3; j++) { pos.set(p[j], 9 * t + 3 * j); nor.set(N.subarray(3 * t, 3 * t + 3), 9 * t + 3 * j); col.set(C.subarray(3 * t, 3 * t + 3), 9 * t + 3 * j); }
+    [0, 1, 1, 2, 2, 0].forEach((j, k) => lines.set(p[j], 18 * t + 3 * k));
   }
-  if (!gl) { mesh = { pos, nor, col, nt }; info.textContent = `${name}: ${nv} vertices, ${nt} triangles, ${new Set(F).size} faces · ${glName}`; draw(); return; }
   const buf = data => { const x = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, x); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); return x; };
-  const tv = { p: buf(pos), n: buf(nor), col: buf(col) }, lv = { p: buf(lines) };
-  mesh = { tv, lv, nt };
-  info.textContent = `${name}: ${nv} vertices, ${nt} triangles, ${new Set(F).size} faces · ${glName}`;
+  mesh = { tv: { p: buf(pos), n: buf(nor), col: buf(col) }, lv: { p: buf(lines) }, nt };
+  info.textContent = `${head} · ${glName}`;
   draw();
 }
 

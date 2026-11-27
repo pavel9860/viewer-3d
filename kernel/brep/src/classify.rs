@@ -20,7 +20,7 @@ pub struct Solid<'a> {
 impl<'a> Solid<'a> {
     pub fn new(b: &'a Body, faces: &[Id<Face>]) -> Self {
         let mut users: HashMap<Id<Edge>, Vec<Id<Face>>> = HashMap::new();
-        for &f in faces { for &l in &b.faces.get(f).loops { for &c in &b.loops.get(l).coedges { users.entry(b.coedges.get(c).edge).or_default().push(f); } } }
+        for &f in faces { for ce in b.face_coedges(f) { users.entry(ce.edge).or_default().push(f); } }
         let mut ids: Vec<_> = users.into_iter().collect();
         ids.sort_unstable_by_key(|x| x.0 .0);
         let edges = ids.into_iter().filter_map(|(e, fs)| {

@@ -32,8 +32,7 @@ fn integrate(s: &dyn Surf, a: P2, b: P2, c: P2, whole: f64, tol: f64, depth: u32
 
 pub fn face_trim(b: &Body, f: Id<Face>) -> Trim {
     let fc = b.faces.get(f);
-    let loops: Vec<Vec<(Id<Edge>, bool)>> = fc.loops.iter().map(|&l| b.loops.get(l).coedges.iter().map(|&c| { let ce = b.coedges.get(c); (ce.edge, ce.sense) }).collect()).collect();
-    Trim::new(b, fc.surface.as_ref(), fc.sense, &loops)
+    Trim::new(b, fc.surface.as_ref(), fc.sense, &b.face_loops(f))
 }
 
 /// volume enclosed by a face set (divergence theorem); also reports faces whose triangulation lost area
@@ -54,7 +53,7 @@ pub fn volume(b: &Body, faces: &[Id<Face>]) -> (f64, usize) {
             if (got - want).abs() > 1e-9 * want.abs().max(1e-12) {
                 bad += 1;
                 if let Ok(d) = std::env::var("BREP_DUMP") { let _ = std::fs::write(format!("{d}/face{}.txt", b.faces.get(f).origin.src), std::iter::once(o).chain(hs.iter()).map(|r| r.iter().map(|q| format!("{} {}", q[0], q[1])).collect::<Vec<_>>().join(";")).collect::<Vec<_>>().join("\n")); }
-                if std::env::var("BREP_DEBUG").is_ok() { eprintln!("triangulation lost area: face src {} outer {} pts, {} holes, area {want:.3e} got {got:.3e}", b.faces.get(f).origin.src, o.len(), hs.len()); }
+                if crate::debug("mesh") { eprintln!("triangulation lost area: face src {} outer {} pts, {} holes, area {want:.3e} got {got:.3e}", b.faces.get(f).origin.src, o.len(), hs.len()); }
             }
             sum += tris.iter().map(|tr| { let (a, b, c) = (t.raw(pts[tr[0]]), t.raw(pts[tr[1]]), t.raw(pts[tr[2]])); integrate(s, a, b, c, rule(s, a, b, c), 1e-12, 0) }).sum::<f64>();
         }

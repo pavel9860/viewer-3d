@@ -116,6 +116,7 @@ impl S<'_> {
         }
         true
     }
+    /// a merges into b at p
     fn collapse(&mut self, a: u32, b: u32, p: V) {
         let fa = std::mem::take(&mut self.vt[a as usize]);
         for t in fa {
@@ -131,8 +132,7 @@ impl S<'_> {
         let qa = self.q[a as usize];
         self.q[b as usize].add(&qa);
         self.gone[a as usize] = true;
-        // only the merged vertex's quadric and position changed: edges between other vertices keep their cost
-        // (their validity is checked when they come up)
+        // only edges at the merged vertex change cost; others are re-validated when popped
         self.stamp[b as usize] += 1;
         self.stamp[a as usize] += 1;
     }
@@ -199,18 +199,15 @@ pub fn levels(pos: &[V], tri: &[[u32; 3]], tag: &[u32], tols: &[f64], workers: u
             if s.gone[a as usize] || s.gone[b as usize] || s.stamp[a as usize] != sa || s.stamp[b as usize] != sb { continue; }
             let (_, p) = s.target(a, b);
             if !s.valid(a, b, p) { continue; }
-            // the survivor is the lower index (a deterministic choice; the position is p either way)
-            let (gone, keep) = (b, a);
-            s.collapse(gone, keep, p);
-            for n in s.ring(keep) { push(&s, &mut h, keep, n); }
+            // the lower index survives
+            s.collapse(b, a, p);
+            for n in s.ring(a) { push(&s, &mut h, a, n); }
         }
         let n = s.alive.iter().filter(|x| **x).count();
         if n < last {
             last = n;
-            let t0 = std::time::Instant::now();
             let mut l = s.level();
             l.err = deviation(pos, tri, &l.pos, &l.tri, workers);
-            if std::env::var("BREP_DEBUG").is_ok() { eprintln!("level tol {tol:.1e}: {n} triangles, deviation {:.2e} in {:.0} ms", l.err, t0.elapsed().as_secs_f64() * 1e3); }
             out.push(l);
         }
     }
@@ -226,8 +223,8 @@ pub fn deviation(pa: &[V], ta: &[[u32; 3]], pb: &[V], tb: &[[u32; 3]], workers: 
         s
     };
     let (sa, sb) = (samples(pa, ta), samples(pb, tb));
-    let (ga, gb) = (Grid::new(pa, ta), Grid::new(pb, tb));
-    let far = |pts: &[V], g: &Grid| -> f64 {
+    let (ga, gb) = (Bvh::new(pa, ta), Bvh::new(pb, tb));
+    let far = |pts: &[V], g: &Bvh| -> f64 {
         let n = pts.len().div_ceil(4096);
         par::map(n, workers, |i| pts[4096 * i..(4096 * (i + 1)).min(pts.len())].iter().map(|&q| g.dist(q)).fold(0.0, f64::max)).into_iter().fold(0.0, f64::max)
     };
@@ -235,19 +232,19 @@ pub fn deviation(pa: &[V], ta: &[[u32; 3]], pb: &[V], tb: &[[u32; 3]], workers: 
 }
 
 /// bounding-box tree over triangles for nearest-triangle distance queries (branch and bound, nearer child first)
-struct Grid<'a> { p: &'a [V], t: &'a [[u32; 3]], nodes: Vec<([f64; 6], u32, u32)>, order: Vec<u32> }
+struct Bvh<'a> { p: &'a [V], t: &'a [[u32; 3]], nodes: Vec<([f64; 6], u32, u32)>, order: Vec<u32> }
 
 const LEAF: usize = 4;
 
-impl<'a> Grid<'a> {
-    fn new(p: &'a [V], t: &'a [[u32; 3]]) -> Grid<'a> {
+impl<'a> Bvh<'a> {
+    fn new(p: &'a [V], t: &'a [[u32; 3]]) -> Bvh<'a> {
         let boxes: Vec<[f64; 6]> = t.iter().map(|x| {
             let v = x.map(|i| p[i as usize]);
             let mut b = [f64::MAX, f64::MAX, f64::MAX, f64::MIN, f64::MIN, f64::MIN];
             for q in v { for k in 0..3 { b[k] = b[k].min(q[k]); b[k + 3] = b[k + 3].max(q[k]); } }
             b
         }).collect();
-        let mut g = Grid { p, t, nodes: vec![], order: (0..t.len() as u32).collect() };
+        let mut g = Bvh { p, t, nodes: vec![], order: (0..t.len() as u32).collect() };
         // node: box, then (first child, 0) for an inner node or (start, count | 1 << 31) for a leaf
         let mut stack = vec![(0usize, t.len(), 0usize)];
         g.nodes.push(([0.0; 6], 0, 0));

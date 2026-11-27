@@ -26,7 +26,7 @@ mod prof {
     pub fn start() {
         const SA_SIGINFO: i32 = 4;
         const SA_RESTART: i32 = 0x1000_0000;
-        let act = SigAction { handler: on_prof as usize, mask: [0; 16], flags: SA_SIGINFO | SA_RESTART, restorer: 0 };
+        let act = SigAction { handler: on_prof as *const () as usize, mask: [0; 16], flags: SA_SIGINFO | SA_RESTART, restorer: 0 };
         unsafe {
             sigaction(27, &act, std::ptr::null_mut());
             setitimer(2, &ITimer { iv_s: 0, iv_us: 100, v_s: 0, v_us: 100 }, std::ptr::null_mut());

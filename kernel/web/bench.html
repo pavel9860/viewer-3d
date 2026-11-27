@@ -5,25 +5,22 @@
 <pre id="o"></pre>
 <!-- median 800x600 frame time over 14 view directions per model; ?m=NAME.mesh for one model -->
 <script type="module">
-import { prepare, camera, createRenderer } from './raster.js';
+import { prepare, camera, createRenderer, DIRS } from './raster.js';
 const o = document.getElementById('o'), log = s => { o.textContent += s + '\n'; };
-const params = new URLSearchParams(location.search);
+const params = new URLSearchParams(location.search), threads = +(params.get('w') || 4);
 const list = params.get('m') ? params.get('m').split(',') : await (await fetch('meshes/index.json')).json();
-const dirs = [[0, 0], [Math.PI / 2, 0], [-Math.PI / 2, 0], [0, Math.PI / 2], [0, Math.PI], [0, -Math.PI / 2],
-  [0.6, -0.5], [-0.6, 0.5], [0.6, 2.6], [-0.6, -2.6], [1.2, 0.8], [-1.2, 2.2], [0.3, 1.7], [-0.9, -1.1]];
-const res = [];
-log(`threads: ${(await createRenderer(prepare(await (await fetch('meshes/Flag.mesh')).arrayBuffer()), +(params.get('w') || 4))).threads}`);
 for (const name of list) {
   const m = prepare(await (await fetch('meshes/' + name)).arrayBuffer());
-  const R = await createRenderer(m, +(params.get('w') || 4)); const ts = [], ph = [];
-  for (const dist of [2.5]) for (const d of dirs) {
-    const cam = camera(d, [0, 0], dist);
+  const R = await createRenderer(m, threads), ts = [];
+  for (const d of DIRS) {
+    const cam = camera(d, [0, 0], 2.5);
     await R.render(cam, 800, 600, { edges: true });
-    let best = 1e9; for (let i = 0; i < 7; i++) { const t0 = performance.now(); await R.render(cam, 800, 600, { edges: true }); best = Math.min(best, performance.now() - t0); } ts.push(best);
+    let best = Infinity;
+    for (let i = 0; i < 7; i++) { const t0 = performance.now(); await R.render(cam, 800, 600, { edges: true }); best = Math.min(best, performance.now() - t0); }
+    ts.push(best);
   }
   ts.sort((a, b) => a - b);
-  res.push({ name, nt: m.nt, med: ts[ts.length >> 1], max: ts[ts.length - 1] });
-  log(`${name.padEnd(24)} ${String(m.nt).padStart(7)} tris  median ${ts[ts.length >> 1].toFixed(2)} ms  max ${ts[ts.length - 1].toFixed(2)} ms`);
+  log(`${name.padEnd(24)} ${String(m.nt).padStart(7)} tris  ${R.threads} threads  median ${ts[ts.length >> 1].toFixed(2)} ms  max ${ts[ts.length - 1].toFixed(2)} ms`);
 }
 log('DONE');
 fetch('/result', { method: 'POST', body: o.textContent }).catch(() => {});

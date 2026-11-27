@@ -69,6 +69,22 @@ pub struct Body {
     pub tol: f64,
 }
 impl Body {
+    /// coedges of all loops of a face
+    pub fn face_coedges(&self, f: Id<Face>) -> impl Iterator<Item = &Coedge> + '_ {
+        self.faces.get(f).loops.iter().flat_map(move |&l| self.loops.get(l).coedges.iter().map(move |&c| self.coedges.get(c)))
+    }
+    /// each loop of a face as (edge, sense) pairs
+    pub fn face_loops(&self, f: Id<Face>) -> Vec<Vec<(Id<Edge>, bool)>> {
+        self.faces.get(f).loops.iter().map(|&l| self.loops.get(l).coedges.iter().map(|&c| { let ce = self.coedges.get(c); (ce.edge, ce.sense) }).collect()).collect()
+    }
+    /// faces of all shells
+    pub fn shell_faces(&self) -> impl Iterator<Item = Id<Face>> + '_ { self.shells.iter().flat_map(|(_, s)| s.faces.iter().copied()) }
+    /// coedge count per edge over the faces of all shells
+    pub fn edge_uses(&self) -> Vec<u32> {
+        let mut u = vec![0u32; self.edges.len()];
+        for f in self.shell_faces() { for ce in self.face_coedges(f) { u[ce.edge.ix()] += 1; } }
+        u
+    }
     /// start and end vertex of a coedge in traversal direction
     pub fn coedge_ends(&self, c: Id<Coedge>) -> (Id<Vertex>, Id<Vertex>) {
         let ce = self.coedges.get(c);
@@ -118,5 +134,19 @@ mod tests {
         assert_eq!(b.shared_chunks(&a), 9);
         assert_eq!(a.get(Id::new(3 * CHUNK + 5)).p[1], 0.0);
         assert_eq!(b.get(Id::new(3 * CHUNK + 5)).p[1], 1.0);
+    }
+}
+
+/// union-find over 0..n; the smaller root wins (deterministic)
+pub struct Dsu(Vec<u32>);
+impl Dsu {
+    pub fn new(n: usize) -> Self { Dsu((0..n as u32).collect()) }
+    pub fn find(&mut self, mut i: u32) -> u32 {
+        while self.0[i as usize] != i { self.0[i as usize] = self.0[self.0[i as usize] as usize]; i = self.0[i as usize]; }
+        i
+    }
+    pub fn union(&mut self, a: u32, b: u32) {
+        let (a, b) = (self.find(a), self.find(b));
+        if a != b { self.0[a.max(b) as usize] = a.min(b); }
     }
 }

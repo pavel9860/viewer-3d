@@ -8,7 +8,7 @@
 //   occluded renderer shows a different, farther or nearer surface (depth order or culling error)
 // Plus: determinism (same frame twice, and 1 vs 4 workers, give identical buffers), timing per model and resolution
 // against the budget, degenerate sizes.
-import { prepare, camera, createRenderer, createLodRenderer, pickLevel, NEAR } from './raster.js';
+import { prepare, camera, createRenderer, createLodRenderer, pickLevel, NEAR, DIRS } from './raster.js';
 
 // frame budget at 800x600: 60 fps x 5 (3.3 ms)
 const BUDGET_MS = 1000 / 60 / 5;
@@ -43,6 +43,22 @@ function bvh(m) {
   build(0, nt);
   return { nodes, idx };
 }
+// ray parameter of the hit of o + s d with triangle t (Moller-Trumbore), or -1; a ray exactly through a shared edge
+// hits both triangles
+function hit(V, T, t, o, d) {
+  const a = 3 * T[3 * t], b = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2];
+  const e1 = [V[b] - V[a], V[b + 1] - V[a + 1], V[b + 2] - V[a + 2]], e2 = [V[c] - V[a], V[c + 1] - V[a + 1], V[c + 2] - V[a + 2]];
+  const p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]];
+  const det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+  if (Math.abs(det) < 1e-300) return -1;
+  const iv = 1 / det, s = [o[0] - V[a], o[1] - V[a + 1], o[2] - V[a + 2]];
+  const u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * iv;
+  if (u < -1e-9 || u > 1 + 1e-9) return -1;
+  const q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]];
+  const v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) * iv;
+  if (v < -1e-9 || u + v > 1 + 1e-9) return -1;
+  return (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * iv;
+}
 // nearest triangle hit by the ray o + s d (s > 0) with camera depth beyond the near plane; returns [t, depth] or null
 function cast(m, acc, o, d, cam) {
   const { V, T } = m, { nodes, idx } = acc;
@@ -60,19 +76,8 @@ function cast(m, acc, o, d, cam) {
     if (t0 > t1) continue;
     if (n.l >= 0) { stack.push(n.l, n.r); continue; }
     for (let i = n.s; i < n.e; i++) {
-      const t = idx[i], a = 3 * T[3 * t], b = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2];
-      // Moller-Trumbore
-      const e1 = [V[b] - V[a], V[b + 1] - V[a + 1], V[b + 2] - V[a + 2]], e2 = [V[c] - V[a], V[c + 1] - V[a + 1], V[c + 2] - V[a + 2]];
-      const p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]];
-      const det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
-      if (Math.abs(det) < 1e-300) continue;
-      const iv = 1 / det, s = [o[0] - V[a], o[1] - V[a + 1], o[2] - V[a + 2]];
-      const u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * iv;
-      if (u < -1e-9 || u > 1 + 1e-9) continue;
-      const q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]];
-      const v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) * iv;
-      if (v < -1e-9 || u + v > 1 + 1e-9) continue; // a ray exactly through a shared edge must hit one of its triangles
-      const tt = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * iv;
+      const t = idx[i];
+      const tt = hit(V, T, t, o, d);
       if (tt <= 0 || tt >= best) continue;
       // beyond the near plane (camera depth along -z of the view)
       const x = o[0] + tt * d[0], y = o[1] + tt * d[1], z = o[2] + tt * d[2], r = cam.r;
@@ -134,10 +139,15 @@ async function checkView(R, m, acc, cam, w, h, step) {
   }
   return { c, bad, fr };
 }
+// distance from q to segment ab
+function segDist(q, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], l = dx * dx + dy * dy;
+  const u = l ? Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / l)) : 0;
+  return Math.hypot(a[0] + u * dx - q[0], a[1] + u * dy - q[1]);
+}
 // the drawn triangle is hit by a ray within the renderer's precision (1/16 pixel) of the pixel centre: vertices are
 // snapped to that grid, so an edge-on wall or a sliver may cover the centre by that much
 function snapHit(m, acc, cam, w, h, px, py, t) {
-  // exact screen-space distance from the pixel centre to the projected triangle, clipped at the near plane
   const { V, T } = m, r = cam.r, tr = cam.t, f = (h / 2) / cam.tanHalf;
   const C = [0, 1, 2].map(k => { const i = 3 * T[3 * t + k], x = V[i], y = V[i + 1], z = V[i + 2]; return [r[0] * x + r[1] * y + r[2] * z + tr[0], r[3] * x + r[4] * y + r[5] * z + tr[1], -(r[6] * x + r[7] * y + r[8] * z + tr[2])]; });
   const Q = [];
@@ -151,8 +161,7 @@ function snapHit(m, acc, cam, w, h, px, py, t) {
   const cr = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
   const sg = P.map((_, i) => cr(P[i], P[(i + 1) % n], q));
   if (sg.every(x => x >= 0) || sg.every(x => x <= 0)) return true;
-  const seg = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l = dx * dx + dy * dy; const u = l ? Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / l)) : 0; return Math.hypot(a[0] + u * dx - q[0], a[1] + u * dy - q[1]); };
-  return Math.min(...P.map((_, i) => seg(P[i], P[(i + 1) % n]))) <= 1 / 16;
+  return Math.min(...P.map((_, i) => segDist(q, P[i], P[(i + 1) % n]))) <= 1 / 16;
 }
 // the pixel centre lies within the renderer's precision (1/16 px) of the boundary of triangle t: snapping can move
 // it to either side (folds and outlines)
@@ -166,21 +175,7 @@ function nearBoundary(m, cam, w, h, px, py, t) {
     P.push([w / 2 + f * (r[0] * x + r[1] * y + r[2] * z + tr[0]) / cz, h / 2 - f * (r[3] * x + r[4] * y + r[5] * z + tr[1]) / cz]);
   }
   const q = [px + 0.5, py + 0.5];
-  const seg = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l = dx * dx + dy * dy; const u = l ? Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / l)) : 0; return Math.hypot(a[0] + u * dx - q[0], a[1] + u * dy - q[1]); };
-  return Math.min(seg(P[0], P[1]), seg(P[1], P[2]), seg(P[2], P[0])) <= 1 / 16;
-}
-// does the ray hit triangle t (any distance in front)
-function castOne(m, o, d, t) {
-  const { V, T } = m, a = 3 * T[3 * t], b = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2];
-  const e1 = [V[b] - V[a], V[b + 1] - V[a + 1], V[b + 2] - V[a + 2]], e2 = [V[c] - V[a], V[c + 1] - V[a + 1], V[c + 2] - V[a + 2]];
-  const p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]];
-  const det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
-  if (Math.abs(det) < 1e-300) return false;
-  const iv = 1 / det, s = [o[0] - V[a], o[1] - V[a + 1], o[2] - V[a + 2]];
-  const u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * iv;
-  const q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]];
-  const v = (d[0] * q[0] + d[1] * q[1] + d[2] * q[2]) * iv;
-  return u >= -1e-9 && v >= -1e-9 && u + v <= 1 + 1e-9 && (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * iv > 0;
+  return Math.min(segDist(q, P[0], P[1]), segDist(q, P[1], P[2]), segDist(q, P[2], P[0])) <= 1 / 16;
 }
 // the drawn depth lies within the range of true depths over the 3x3 pixel neighbourhood (steep, sub-pixel geometry)
 function withinPixel(m, acc, cam, w, h, px, py, z) {
@@ -208,8 +203,7 @@ const hash = a => { let x = 2166136261 >>> 0; const u = new Uint32Array(a.buffer
 const params = new URLSearchParams(location.search);
 const quick = params.has('quick');
 const only = params.get('m');
-const dirs = [[0, 0], [Math.PI / 2, 0], [-Math.PI / 2, 0], [0, Math.PI / 2], [0, Math.PI], [0, -Math.PI / 2],
-  [0.6, -0.5], [-0.6, 0.5], [0.6, 2.6], [-0.6, -2.6], [1.2, 0.8], [-1.2, 2.2], [0.3, 1.7], [-0.9, -1.1]];
+const dirs = DIRS;
 const dists = params.has('d') ? params.get('d').split(',').map(Number) : quick ? [0.6, 2.5] : [0.3, 0.6, 1.0, 1.5, 2.5, 6, 30];
 const pans = [[0, 0], [0.5, -0.3]];
 
@@ -222,49 +216,49 @@ try {
     // every detail level is checked as a mesh of its own; frame times are of the level the camera picks
     const L = await createLodRenderer(M);
     for (let lv = 0; lv < M.levels.length; lv++) {
-    if (params.has('lv') && +params.get('lv') !== lv) continue;
-    const m = M.levels[lv];
-    const R = await createRenderer(m), R1 = await createRenderer(m, 1); // reorders m's triangles: before the BVH
-    const acc = bvh(m);
-    const tot = { ok: 0, hole: 0, spill: 0, occluded: 0, outline: 0 };
-    const worst = [];
-    let views = 0;
-    for (const dir of (quick ? dirs.slice(0, 6) : dirs)) for (const dist of dists) for (const pan of (quick ? pans.slice(0, 1) : pans)) {
-      const cam = camera(dir, pan, dist);
-      const { c, bad } = await checkView(R, m, acc, cam, 160, 120, 2);
-      views++;
-      for (const k in tot) tot[k] += c[k];
-      if (c.hole + c.spill + c.occluded > 0) worst.push({ dir, dist, pan, ...c, bad });
-    }
-    // determinism and timing at viewer resolutions
-    const cam = camera([0.6, -0.5], [0, 0], 2.5);
-    const fh = async (r) => { const f = await r.render(cam, 640, 480, { edges: true }); return hash(f.color) + hash(f.id) + hash(f.depth); };
-    const ha = await fh(R), hb = await fh(R), h1 = await fh(R1);
-    // frame time over the 14 directions at the default distance: median and worst
-    const time = async (w, h) => {
-      const ts = [];
-      for (const dir of dirs) {
-        const c = camera(dir, [0, 0], 2.5), rs = [];
-        await L.render(c, w, h, { edges: true });
-        for (let i = 0; i < 5; i++) { const t0 = performance.now(); await L.render(c, w, h, { edges: true }); rs.push(performance.now() - t0); }
-        ts.push(Math.min(...rs));
+      if (params.has('lv') && +params.get('lv') !== lv) continue;
+      const m = M.levels[lv];
+      const R = await createRenderer(m), R1 = await createRenderer(m, 1); // reorders m's triangles: before the BVH
+      const acc = bvh(m);
+      const tot = { ok: 0, hole: 0, spill: 0, occluded: 0, outline: 0 };
+      const worst = [];
+      let views = 0;
+      for (const dir of (quick ? dirs.slice(0, 6) : dirs)) for (const dist of dists) for (const pan of (quick ? pans.slice(0, 1) : pans)) {
+        const cam = camera(dir, pan, dist);
+        const { c, bad } = await checkView(R, m, acc, cam, 160, 120, 2);
+        views++;
+        for (const k in tot) tot[k] += c[k];
+        if (c.hole + c.spill + c.occluded > 0) worst.push({ dir, dist, pan, ...c, bad });
       }
-      ts.sort((x, y) => x - y);
-      return [ts[ts.length >> 1], ts[ts.length - 1]];
-    };
-    // frame times only once per model (they are of the picked level, not of this one)
-    const [t800, w800] = lv ? [0, 0] : await time(800, 600), [t400] = lv ? [0] : await time(400, 300), [t1080] = quick || lv ? [0] : await time(1920, 1080);
-    const picked = pickLevel(M, camera([0, 0], [0, 0], 2.5), 600);
-    // degenerate sizes must not throw
-    for (const [w, h] of [[1, 1], [7, 5], [3, 200]]) await R.render(cam, w, h, {});
-    const errs = tot.hole + tot.spill + tot.occluded;
-    const outlineRate = tot.outline / (tot.ok + errs + tot.outline);
-    const det = ha === hb && ha === h1;
-    const ok = errs === 0 && det && outlineRate < 1e-4 && w800 <= BUDGET_MS;
-    failures += ok ? 0 : 1;
-    if (!lv) perf.push({ name, nt: M.levels[picked].nt, t800: w800, t400, t1080 });
-    log(`${ok ? 'PASS' : 'FAIL'} ${(lv ? `  level ${lv} (dev ${(m.err / 2).toExponential(1)} of diag)` : name).padEnd(24)} ${String(m.nt).padStart(7)} tris ${m.closed ? 'closed' : 'open  '} | ${views} views, ${tot.ok + errs + tot.outline} samples: crack ${tot.hole} spill ${tot.spill} occluded ${tot.occluded} (outline 1px ${tot.outline}) | deterministic ${det} (1 vs ${R.threads} threads) ${lv ? '' : ` | picked level ${picked} (${M.levels[picked].nt} tris) 800x600 ${t800.toFixed(2)} ms (worst ${w800.toFixed(2)}), 400x300 ${t400.toFixed(2)} ms${t1080 ? `, 1920x1080 ${t1080.toFixed(2)} ms` : ''}`}`);
-    for (const wv of worst.slice(0, 3)) log(`     view dir ${wv.dir.map(x => x.toFixed(2))} dist ${wv.dist} pan ${wv.pan}: hole ${wv.hole} spill ${wv.spill} occluded ${wv.occluded} e.g. ${JSON.stringify(wv.bad)}`);
+      // determinism and timing at viewer resolutions
+      const cam = camera([0.6, -0.5], [0, 0], 2.5);
+      const fh = async (r) => { const f = await r.render(cam, 640, 480, { edges: true }); return hash(f.color) + hash(f.id) + hash(f.depth); };
+      const ha = await fh(R), hb = await fh(R), h1 = await fh(R1);
+      // frame time over the 14 directions at the default distance: median and worst
+      const time = async (w, h) => {
+        const ts = [];
+        for (const dir of dirs) {
+          const c = camera(dir, [0, 0], 2.5), rs = [];
+          await L.render(c, w, h, { edges: true });
+          for (let i = 0; i < 5; i++) { const t0 = performance.now(); await L.render(c, w, h, { edges: true }); rs.push(performance.now() - t0); }
+          ts.push(Math.min(...rs));
+        }
+        ts.sort((x, y) => x - y);
+        return [ts[ts.length >> 1], ts[ts.length - 1]];
+      };
+      // frame times once per model, of the level the camera picks
+      const [t800, w800] = lv ? [0, 0] : await time(800, 600), [t400] = lv ? [0] : await time(400, 300), [t1080] = quick || lv ? [0] : await time(1920, 1080);
+      const picked = pickLevel(M, camera([0, 0], [0, 0], 2.5), 600);
+      // degenerate sizes must not throw
+      for (const [w, h] of [[1, 1], [7, 5], [3, 200]]) await R.render(cam, w, h, {});
+      const errs = tot.hole + tot.spill + tot.occluded;
+      const outlineRate = tot.outline / (tot.ok + errs + tot.outline);
+      const det = ha === hb && ha === h1;
+      const ok = errs === 0 && det && outlineRate < 1e-4 && w800 <= BUDGET_MS;
+      failures += ok ? 0 : 1;
+      if (!lv) perf.push({ name, nt: M.levels[picked].nt, t800: w800, t400, t1080 });
+      log(`${ok ? 'PASS' : 'FAIL'} ${(lv ? `  level ${lv} (dev ${(m.err / 2).toExponential(1)} of diag)` : name).padEnd(24)} ${String(m.nt).padStart(7)} tris ${m.closed ? 'closed' : 'open  '} | ${views} views, ${tot.ok + errs + tot.outline} samples: crack ${tot.hole} spill ${tot.spill} occluded ${tot.occluded} (outline 1px ${tot.outline}) | deterministic ${det} (1 vs ${R.threads} threads) ${lv ? '' : ` | picked level ${picked} (${M.levels[picked].nt} tris) 800x600 ${t800.toFixed(2)} ms (worst ${w800.toFixed(2)}), 400x300 ${t400.toFixed(2)} ms${t1080 ? `, 1920x1080 ${t1080.toFixed(2)} ms` : ''}`}`);
+      for (const wv of worst.slice(0, 3)) log(`     view dir ${wv.dir.map(x => x.toFixed(2))} dist ${wv.dist} pan ${wv.pan}: hole ${wv.hole} spill ${wv.spill} occluded ${wv.occluded} e.g. ${JSON.stringify(wv.bad)}`);
     }
   }
   const worstT = perf.reduce((a, b) => (b.t800 > a.t800 ? b : a), perf[0]);

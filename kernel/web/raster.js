@@ -7,10 +7,9 @@
 // runs on the calling thread.
 
 /**
- * parse a `brep mesh --out` file: u32 nv, u32 nt, f32 xyz*nv, u32 3*nt, u32 face*nt, normalized to the unit sphere;
- * then optional detail levels ("LODS", f32 chord of the mesh, u32 count, per level f32 error and the same block).
- * Returns the mesh with `chord` (its deviation from the exact model, normalized units) and `levels`: the mesh itself
- * (err 0), then each coarser level with `err`, its largest deviation from the mesh; all in the same frame.
+ * parse a `brep mesh --out` file (format in brep/src/bin/brep.rs), scaled so the full mesh's box has diagonal 2 and
+ * centre 0. Returns the mesh with `chord` and `levels`: the mesh itself (err 0), then each coarser level with `err`,
+ * its measured deviation from the mesh; lengths in the same scaled units.
  */
 export function prepare(buffer) {
   const dv = new DataView(buffer);
@@ -19,8 +18,7 @@ export function prepare(buffer) {
     return { nv, nt, P: new Float32Array(buffer.slice(p, p + nv * 12)), T: new Uint32Array(buffer.slice(p + nv * 12, p + nv * 12 + nt * 12)), F: new Uint32Array(buffer.slice(p + nv * 12 + nt * 12, p + nv * 12 + nt * 16)), end: p + nv * 12 + nt * 16 };
   };
   const b0 = block(0);
-  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < b0.nv; i++) for (let k = 0; k < 3; k++) { const x = b0.P[3 * i + k]; if (x < lo[k]) lo[k] = x; if (x > hi[k]) hi[k] = x; }
+  const [lo, hi] = bbox(b0.P, b0.nv);
   const c = [0, 1, 2].map(k => (lo[k] + hi[k]) / 2), s = 2 / (Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1);
   const m = build(b0, c, s);
   m.err = 0; m.levels = [m];
@@ -31,13 +29,17 @@ export function prepare(buffer) {
     off += 12;
     for (let i = 0; i < n; i++) {
       const err = dv.getFloat32(off, true) * s, b = block(off + 4);
-      const l = build(b, c, s);
-      l.err = err; l.levels = null;
-      m.levels.push(l);
+      m.levels.push(Object.assign(build(b, c, s), { err }));
       off = b.end;
     }
   }
   return m;
+}
+
+function bbox(P, n) {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) { const x = P[3 * i + k]; if (x < lo[k]) lo[k] = x; if (x > hi[k]) hi[k] = x; }
+  return [lo, hi];
 }
 
 function build({ nv, nt, P, T, F }, c, s) {
@@ -58,9 +60,8 @@ function build({ nv, nt, P, T, F }, c, s) {
     const a = T[3 * t + k], b = T[3 * t + (k + 1) % 3], key = a * nv + b, rev = b * nv + a;
     if (half.has(rev)) { const n = half.get(rev) - 1; if (n) half.set(rev, n); else half.delete(rev); } else half.set(key, (half.get(key) || 0) + 1);
   }
-  const blo = [Infinity, Infinity, Infinity], bhi = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < nv; i++) for (let k = 0; k < 3; k++) { blo[k] = Math.min(blo[k], V[3 * i + k]); bhi[k] = Math.max(bhi[k], V[3 * i + k]); }
-  return { nv, nt, V, T, F, N, C, closed: half.size === 0, lo: blo, hi: bhi };
+  const [lo, hi] = bbox(V, nv);
+  return { nv, nt, V, T, F, N, C, closed: half.size === 0, lo, hi };
 }
 
 /**
@@ -91,6 +92,9 @@ export function camera(rot, pan, dist) {
 }
 
 export const NEAR = 1e-3;
+/** test and benchmark view directions (rotation about x, y) */
+export const DIRS = [[0, 0], [Math.PI / 2, 0], [-Math.PI / 2, 0], [0, Math.PI / 2], [0, Math.PI], [0, -Math.PI / 2],
+  [0.6, -0.5], [-0.6, 0.5], [0.6, 2.6], [-0.6, -2.6], [1.2, 0.8], [-1.2, 2.2], [0.3, 1.7], [-0.9, -1.1]];
 const MB = 1 << 20, HEAP = 16 * MB, CAM_BYTES = 128;
 
 // Threads: the calling thread is thread 0, workers are threads 1..3. A frame is started through a control block in
@@ -190,7 +194,6 @@ export async function createRenderer(m, nthreads = 4) {
   chunk.forEach((c, i) => growPool(c, recs[i] + 1024));
   const ctl = () => new Int32Array(rt.mem.buffer, rt.ctl, 8);
 
-  // one frame on all threads; false when a band list pool overflowed (grown here: the caller renders again)
   // wait without spinning (a spinning thread competes with the workers for cores)
   async function until(c, k, n) {
     for (let v; (v = Atomics.load(c, k)) < n;) {
@@ -198,6 +201,7 @@ export async function createRenderer(m, nthreads = 4) {
       if (r.async) await r.value;
     }
   }
+  // one frame on all threads; false when a band list pool overflowed (grown here: the caller renders again)
   async function run() {
     setDesc();
     u32().set([pcam, pv, pt, pn, pc, nv, nt, pcl, pdesc, nw, frame, ...caches, ...ranges.flat()], parg / 4);

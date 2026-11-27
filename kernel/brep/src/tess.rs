@@ -84,14 +84,11 @@ fn flip(tri: &mut [[usize; 3]], uv: &[P2], scale: &dyn Fn(P2) -> [f64; 2], bound
 
 struct FaceMesh { keys: Vec<Key>, pos: Vec<V>, tri: Vec<[usize; 3]>, coarse: bool, dev: f64 }
 
-fn loops_of(b: &Body, f: Id<Face>) -> Vec<Vec<(Id<Edge>, bool)>> {
-    b.faces.get(f).loops.iter().map(|&l| b.loops.get(l).coedges.iter().map(|&c| { let ce = b.coedges.get(c); (ce.edge, ce.sense) }).collect()).collect()
-}
 
 fn face_mesh(b: &Body, fi: u32, f: Id<Face>, o: &Opts, sag: &HashMap<Id<Edge>, f64>) -> FaceMesh {
     let fc = b.faces.get(f);
     let s = fc.surface.as_ref();
-    let tr = Trim::with_edge_sag(b, s, fc.sense, &loops_of(b, f), &|e| sag.get(&e).copied().unwrap_or(o.chord));
+    let tr = Trim::with_edge_sag(b, s, fc.sense, &b.face_loops(f), &|e| sag.get(&e).copied().unwrap_or(o.chord));
     // ring points and their keys (the ring of a loop is its items' points without each item's last point)
     let mut rings: Vec<Vec<P2>> = vec![];
     let mut rkeys: Vec<Vec<(Key, V)>> = vec![];
@@ -234,12 +231,12 @@ pub fn tessellate(b: &Body, faces: &[Id<Face>], o: &Opts, workers: usize) -> (Me
     for _ in 0..8 {
         let bad: Vec<Vec<Id<Edge>>> = par::map(faces.len(), workers, |i| {
             let fc = b.faces.get(faces[i]);
-            let t = Trim::with_edge_sag(b, fc.surface.as_ref(), fc.sense, &loops_of(b, faces[i]), &|e| sag.get(&e).copied().unwrap_or(o.chord));
+            let t = Trim::with_edge_sag(b, fc.surface.as_ref(), fc.sense, &b.face_loops(faces[i]), &|e| sag.get(&e).copied().unwrap_or(o.chord));
             let mut v = t.crossing_edges();
             v.extend(t.bent_edges(fc.surface.as_ref(), o.chord));
             v
         });
-        if std::env::var("TESS_DEBUG").is_ok() { eprintln!("refine round: {} edges in {} faces", bad.iter().map(|v| v.len()).sum::<usize>(), bad.iter().filter(|v| !v.is_empty()).count()); }
+        if crate::debug("tess") { eprintln!("refine round: {} edges in {} faces", bad.iter().map(|v| v.len()).sum::<usize>(), bad.iter().filter(|v| !v.is_empty()).count()); }
         let mut any = false;
         for e in bad.into_iter().flatten() { let v = sag.entry(e).or_insert(o.chord); *v *= 0.25; any = true; }
         if !any { break; }
@@ -251,7 +248,7 @@ pub fn tessellate(b: &Body, faces: &[Id<Face>], o: &Opts, workers: usize) -> (Me
     for (fi, fm) in fms.into_iter().enumerate() {
         if fm.tri.is_empty() { st.empty += 1; }
         st.coarse += fm.coarse as usize;
-        if fm.coarse && std::env::var("TESS_DEBUG").is_ok() { let f = b.faces.get(faces[fi]); eprintln!("coarse face STEP #{} dom {:?} per {} {} tris {} dev {:.2e}", f.origin.src, f.surface.dom(), f.surface.per_u(), f.surface.per_v(), fm.tri.len(), fm.dev); }
+        if fm.coarse && crate::debug("tess") { let f = b.faces.get(faces[fi]); eprintln!("coarse face STEP #{} dom {:?} per {} {} tris {} dev {:.2e}", f.origin.src, f.surface.dom(), f.surface.per_u(), f.surface.per_v(), fm.tri.len(), fm.dev); }
         st.max_dev = st.max_dev.max(fm.dev);
         let ids: Vec<u32> = fm.keys.iter().zip(&fm.pos).map(|(k, p)| *index.entry(*k).or_insert_with(|| { m.pos.push(*p); (m.pos.len() - 1) as u32 })).collect();
         for t in fm.tri {

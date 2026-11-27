@@ -53,7 +53,7 @@ pub fn check(b: &Body, samples: usize, workers: usize) -> Report {
     }
     // geometry, in parallel over edges
     let edges: Vec<(Id<Edge>, Vec<Id<Face>>)> = edge_faces.into_iter().collect();
-    let debug = std::env::var("BREP_DEBUG").is_ok();
+    let debug = crate::debug("check");
     let next = std::sync::atomic::AtomicUsize::new(0);
     let parts: Vec<(usize, usize, usize, f64, f64)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..workers.max(1)).map(|_| sc.spawn(|| {

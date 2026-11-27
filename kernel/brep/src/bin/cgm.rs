@@ -52,13 +52,13 @@ fn main() {
         let bb = s.bbox;
         println!("{{\"ir\":\"{f}\",\"solids\":{},\"shells\":{},\"faces\":{},\"skipped\":{},\"failed\":{},\"tris\":{},\"area\":{:.6},\"volume\":{:.6},\"open_edges\":{},\"nonmanifold_edges\":{},\"bbox\":[{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}],\"ms\":{:.1}}}",
             solids.len(), shells.len(), m.faces.len(), m.skipped.len(), mesh.failed.len(), s.tris, s.area, s.volume, s.open_edges, s.nonmanifold_edges, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5], t0.elapsed().as_secs_f64() * 1e3);
-        if std::env::var("CGM_ORIENT").is_ok() {
+        if brep::debug("orient") {
             match brep::cgm_mesh::orientation_fix(&mesh) {
                 Some(fix) => for (f, x) in mesh.faces.iter().zip(fix) { eprintln!("orient {} {} {} {} {} {}", f.0, f.1, f.2, f.3, f.4, x as i32); },
                 None => eprintln!("orient none"),
             }
         }
-        if std::env::var("CGM_OPEN").is_ok() {
+        if brep::debug("open") {
             let c = brep::cgm_mesh::open_causes(&mesh);
             eprintln!("open edges: {} on edges whose other face is not meshed ({} edges), {} on edges of two faces ({} edges: {:?}), {} inside faces", c.lone, c.lone_edges.len(), c.joined, c.joined_edges.len(), &c.joined_edges[..c.joined_edges.len().min(20)], c.inside);
         }
