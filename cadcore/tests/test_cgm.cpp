@@ -145,20 +145,13 @@ TEST_CASE("CGM corpus parts: faces per stored form") {
     }
 }
 
-// Newer kinds: `decoded` faces (SurfFillet only with pending kinds: absent without them); `check` tests
-// their parameters.
+// Newer kinds: `decoded` faces; `check` tests their parameters.
 struct KindPart { const char* path; std::size_t faces, decoded, count = 0; };  // count: kind instances (0: some)
 void kind_part(const KindPart& pt, bool surface, std::uint32_t kind, const std::function<void(const cgm::Ir&, std::size_t)>& check) {
     std::vector<std::uint8_t> keep;
     const auto st = stream(pt.path, keep);
     if (!st) return;
-    const bool gated = surface && kind == cgm::SurfFillet;
-    if (gated) {
-        const cgm::Ir plain = decode(*st, false);
-        CHECK(plain.faces.size() < pt.decoded);
-        for (const auto& s : plain.surfaces) CHECK(s.kind != kind);
-    }
-    const cgm::Ir ir = decode(*st, gated);
+    const cgm::Ir ir = decode(*st, false);
     CHECK(ir.faces.size() == pt.decoded);
     CHECK(ir.faces.size() + ir.skipped.size() >= pt.faces);
     std::size_t n = 0;
@@ -168,7 +161,7 @@ void kind_part(const KindPart& pt, bool surface, std::uint32_t kind, const std::
     CHECK((pt.count ? n == pt.count : n > 0));
 }
 
-TEST_CASE("CGM surfaces: fillets (216, pending), revolutions (211), ruled (243, 251)") {
+TEST_CASE("CGM surfaces: fillets (216), revolutions (211), ruled (243, 251)") {
     const char* g = "caa/caadoc/CAAElecHarnessItf.edu/CNext/resources/graphic/";
     const std::string plug = std::string(g) + "CAA_EhiFLEXComputeBundleSegment_Sample/plug.CATPart";
     const std::string dryer = std::string(g) + "CAA_EHIMultiSegmentSample/hair-dryer.CATPart";
@@ -235,7 +228,7 @@ TEST_CASE("CGM p-curves: B-splines (170), expressions (155)") {
         CHECK(k == p.size());
     };
     for (const KindPart& pt : {KindPart{"caa/caadoc/CAAAssemblyUI.edu/CNext/resources/graphic/Jack_Frame.CATPart", 216, 216},
-                                  KindPart{"local/703cd616", 3872, 3640},
+                                  KindPart{"local/703cd616", 3872, 3872},
                                   KindPart{"local/b33cd8bf", 328, 328}})
         kind_part(pt, false, cgm::PcExpr, expr);
 }

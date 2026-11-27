@@ -1,8 +1,6 @@
 # Newer IR kinds (cadcore -> kernel)
 
-cadcore emits p-curve kinds 4 and 5 and surface kinds 9, 11 and 12 by default. Kind 10 (fillet) is
-emitted only on request (`cadcli cgm PART OUT --pending`, `cgm::DecodeOptions::pending_kinds`); without
-it, its faces are skipped with "awaits kernel support". The IR layout is unchanged (CGMIR v2): each
+cadcore emits all of these by default (kernel support confirmed 2026-11-27). The IR layout is unchanged (CGMIR v2): each
 surface is `kind, id, n, f64 p[n]`.
 
 ## 9: revolution (CGM class 211)

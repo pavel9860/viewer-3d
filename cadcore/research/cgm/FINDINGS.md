@@ -257,8 +257,8 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   segment 1 was assumed: vertex parameters on Hermite curves fell outside their knots (part-2402: 627 of
   2,263 fillet line coedges; the kernel failed 546 faces there, 29 after). part-6141 and the Cap-EL
   parts' NURBS boundaries now lie in their knot ranges.
-- Kinds 4, 5, 9, 11, 12 are emitted by default (kernel support, 2026-11-27); 10 stays behind
-  `--pending`. Default: 479,480 -> 487,731 faces; no part loses faces.
+- All newer kinds (4, 5, 9, 10, 11, 12) are emitted by default (kernel support, 2026-11-27); fillet
+  edges meet within 1.3e-6 of the part diagonal (kernel BREP_DEBUG=gaps). Default: 479,480 -> 487,731 faces; no part loses faces.
 - Results (155 as IR p-curve kind 5, `--pending`): 488,806 -> 489,893 faces, 1,109 -> 1,141
   complete parts; default unchanged; no part loses faces.
 - Still open: 152 / code 26 (ellipse-like p-curve: c[2], angle, a, b, ..., t0 t1 s), codes 60 / 61 (surfaces

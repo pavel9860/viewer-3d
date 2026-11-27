@@ -189,10 +189,6 @@ private:
         return o.refs[0];
     }
 
-    void pending(const Obj& o, const char* what) const {
-        if (!opt_.pending_kinds) throw DecodeError(ErrorCode::Unsupported, "class " + std::to_string(o.type) + " (" + what + ") awaits kernel support", o.at);
-    }
-
     // One item of a 155 expression (varint form: i16 code, [i16 inputs, i16 0 for codes 1 and 4], f64
     // values, child items) -> code nvals vals nkids kids (cgm_model.hpp PcExpr).
     static void expr(Rd& r, std::vector<double>& p, int depth) {
@@ -328,7 +324,6 @@ private:
                 break;
             }
             case 216:
-                pending(o, "fillet");
                 sf.kind = SurfFillet;
                 sections(r, 10, o.at, sf.p);
                 break;

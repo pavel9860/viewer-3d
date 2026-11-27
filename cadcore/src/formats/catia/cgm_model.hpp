@@ -45,7 +45,7 @@ enum SurfaceKind : std::uint32_t {
     SurfExtrusion = 7,  // pcurve d[3]                 p = C(u) + v d, C: a p-curve on another surface
     SurfOffset = 8,     // base d                      p = base(u, v) + d unit(Su x Sv)
     SurfRevolution = 9,       // o[3] X[3] Y[3] Z[3] k | profile   p = o + Rot_Z(v / k)(C(u) - o), X toward Y
-    SurfFillet = 10,          // only with DecodeOptions::pending_kinds; n | knots[n] | S[n][10] | S'[n][10] | S''[n][10] | u0 u1 v0 v1
+    SurfFillet = 10,          // n | knots[n] | S[n][10] | S'[n][10] | S''[n][10] | u0 u1 v0 v1
                               //   section S = (p1, p2, c, th), quintic Hermite in u;
                               //   p = c + (sin(th - f)(p1 - c) + sin f (p2 - c)) / sin th, f = th (v - v0) / (v1 - v0)
     SurfRuled = 11,           // n | knots[n] | S[n][6] | S'[n][6] | S''[n][6] | u0 u1 v0 v1
@@ -89,7 +89,7 @@ struct Ir {
 };
 
 struct DecodeOptions {
-    bool pending_kinds = false;  // emit SurfFillet (its carriers' parameters are not settled)
+    bool pending_kinds = false;  // emit kinds the kernel does not evaluate yet (none at present)
 };
 // The B-rep of a framed stream (varint dialect, or compact through cgm_compact.hpp). Faces whose
 // geometry or grammar is not decoded are left out and listed in `skipped` with the reason.
