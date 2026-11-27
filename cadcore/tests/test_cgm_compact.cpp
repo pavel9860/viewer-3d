@@ -194,6 +194,12 @@ TEST_CASE("CGM compact 2012+: values derived from other records") {
     // 108 and 101 at the start takes the line's start (2)
     t.add(192, 108, compact().count(1).sint(7).u8(0x0d).u8(0x80 | 1 << 2).f64s({0, 20}));
     t.add(14, 109, compact().count(2).sint(1).sint(8).u8(0x88));
+    // line 111 along +v at the box's u start, t 0..8; edge curve 112 of lines 101 and 111, the second
+    // reversed (map 3: t = (q - 10) / -1); point 113 shared by 112 and 111 at the end: the line's end (8),
+    // the edge curve's parameter its image (2)
+    t.add(150, 111, compact().sint(11).u8(0x01 | 0x10).f64s({0, 8}));
+    t.add(192, 112, compact().count(2).sint(11).sint(1).u8(0x08).u8(0x80 | 1 << 2).i16(3).f64s({2, 10, 0, 8, 0, -1, 10}).f64s({2, 10, 0}));
+    t.add(14, 113, compact().count(2).sint(1).sint(2).u8(0x84));
     const auto out = cgm::canonical_records(t.s, cgm::CompactLayout{true, true, true});
     for (std::size_t i = 0; i < out.size(); ++i) {
         CAPTURE(t.s.records[i].id);
@@ -207,4 +213,6 @@ TEST_CASE("CGM compact 2012+: values derived from other records") {
     CHECK(payload(103) == raw().count(2).f64(2).i32(1).f64(2).i32(1).b);
     CHECK(payload(107) == raw().count(1).f64(0.5).i32(2).b);
     CHECK(payload(109) == raw().count(2).f64(2).i32(1).f64(2).i32(1).b);
+    CHECK(payload(111) == raw().f64s({0, 0, 0, 1, 0, 8}).b);
+    CHECK(payload(113) == raw().count(2).f64(2).i32(1).f64(8).i32(1).b);
 }

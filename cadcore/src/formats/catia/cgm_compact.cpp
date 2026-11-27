@@ -20,18 +20,64 @@ using Range = std::array<double, 2>;  // t0 t1
 int pm(int bit) { return bit ? 1 : -1; }
 bool is_edge_curve(std::uint16_t t) { return t >= 191 && t <= 193; }
 
-// Values 2012+ records take from others: surface parameter boxes, curve ranges.
+// An edge curve's parameter map onto one of its curves (cgm_model.hpp grammar), inverted: the edge
+// curve's parameter for parameter v on that curve.
+struct Map {
+    int m = 0;
+    double a0 = 0, a1 = 0, b0 = 0, b1 = 0, s = 1, off = 0;
+    std::vector<double> A, B;
+    double inverse(double v) const {
+        switch (m) {
+            case 2: return b1 != b0 ? a0 + (v - b0) * (a1 - a0) / (b1 - b0) : a0;
+            case 3: return v * s + off;
+            case 5: {
+                for (std::size_t i = 0; i + 1 < B.size(); ++i)
+                    if ((v - B[i]) * (v - B[i + 1]) <= 0 && B[i + 1] != B[i]) return A[i] + (v - B[i]) / (B[i + 1] - B[i]) * (A[i + 1] - A[i]);
+                return v;
+            }
+            default: return v;  // identity
+        }
+    }
+};
+struct EdgeCurve { std::vector<std::uint32_t> refs; std::vector<Map> maps; };  // maps[i]: refs[i]
+
+// Canonical edge-curve payload -> maps per curve (refs[0]: identity, then one per non-zero map).
+std::vector<Map> edge_maps(const std::vector<std::uint8_t>& p) {
+    std::size_t k = 0;
+    auto f = [&] { const double d = load_f64_le(p.data() + k); k += 8; return d; };
+    const std::uint32_t n = varint(ByteView(p.data(), p.size()), k);
+    std::vector<Map> maps(1);
+    for (std::uint32_t j = 0; j < n; ++j) {
+        Map mp;
+        mp.m = std::int16_t(load_u16(p.data() + k, false));
+        k += 2;
+        mp.a0 = f(); mp.a1 = f(); f();
+        if (mp.m == 0) continue;
+        mp.b0 = f(); mp.b1 = f();
+        if (mp.m == 1) f();
+        if (mp.m == 3) { mp.s = f(); mp.off = f(); }
+        if (mp.m == 5) {
+            const std::uint32_t N = varint(ByteView(p.data(), p.size()), k);
+            for (std::uint32_t i = 0; i < N; ++i) mp.A.push_back(f());
+            for (std::uint32_t i = 0; i < N; ++i) mp.B.push_back(f());
+        }
+        maps.push_back(std::move(mp));
+    }
+    return maps;
+}
+
+// Values 2012+ records take from others: surface parameter boxes, curve ranges, edge-curve maps.
 struct Ctx {
     std::unordered_map<std::uint32_t, int> edge_uses;  // edge curve -> edges referencing it
     std::unordered_map<std::uint32_t, std::uint16_t> type;
     std::unordered_map<std::uint32_t, Box> box;
     std::unordered_map<std::uint32_t, Range> range;
-    std::unordered_map<std::uint32_t, std::uint32_t> first;  // edge curve -> its first curve
+    std::unordered_map<std::uint32_t, EdgeCurve> edge_curve;
     std::uint16_t curve_type(std::uint32_t id) const {  // through edge curves
         for (int d = 0; d < 8; ++d) {
-            auto f = first.find(id);
-            if (f == first.end()) break;
-            id = f->second;
+            auto e = edge_curve.find(id);
+            if (e == edge_curve.end()) break;
+            id = e->second.refs.at(0);
         }
         auto t = type.find(id);
         return t == type.end() ? 0 : t->second;
@@ -243,7 +289,7 @@ void edge_curve_derived(In& in, Out& o, const std::vector<std::uint32_t>& refs, 
         wider = u != cx.edge_uses.end() && u->second == 1 && std::abs(f1 - f0) > std::abs(it->second[1] - it->second[0]) + 1e-9;
     }
     cx.range[self] = (infinite || wider) && it != cx.range.end() ? it->second : Range{f0, f1};
-    cx.first[self] = refs.at(0);
+    cx.edge_curve[self] = {refs, edge_maps(o.p)};
 }
 
 // 14 (2012+): refs, code byte; per ref a parameter: 2 start, 1 end of the curve's range, 0 stored f64
@@ -261,18 +307,31 @@ void point_derived(In& in, Out& o, Canonical& c, Ctx& cx, std::size_t at) {
     };
     const int c0 = cd >> 2 & 3;
     if (c0 == 3) bad("point parameter code 3", at);
-    // shared by refs 0 and 1 (bit 7): a derived value is the second curve's when the first's range is
-    // wider (an edge curve running a full period around its p-curve's range)
+    // shared by refs 0 and 1 (bit 7): a derived start / end is the second curve's, unless the edge curve's
+    // range is narrower (in edge-curve parameters: the edge's extent) or the second's is the infinite
+    // default; the edge curve's parameter is then the image through the second curve's map
     const bool shared = (cd & 0x80) && refs.size() > 1;
-    auto width = [&](std::uint32_t ref) { const auto& r = cx.curve_range(ref, at); return std::abs(r[1] - r[0]); };
-    const bool narrower = shared && c0 != 0 && cx.range.count(refs[0]) && cx.range.count(refs[1]) && width(refs[1]) + 1e-9 < width(refs[0]);
-    const double q0 = c0 == 0 ? in.f64() : at_end(narrower ? refs[1] : refs[0], c0);
+    const EdgeCurve* ec = nullptr;
+    std::size_t on = 0;
+    auto finite = [&](std::uint32_t ref) { auto r = cx.range.find(ref); return r != cx.range.end() && std::abs(r->second[0]) < 1e6 && std::abs(r->second[1]) < 1e6; };
+    if (shared && c0 != 0 && finite(refs[1]) && cx.range.count(refs[0]))
+        if (auto e = cx.edge_curve.find(refs[0]); e != cx.edge_curve.end() && e->second.refs.size() == e->second.maps.size())
+            for (std::size_t i = 0; i < e->second.refs.size(); ++i)
+                if (e->second.refs[i] == refs[1]) {
+                    const Map& mp = e->second.maps[i];
+                    const Range& r1 = cx.range.at(refs[1]);
+                    const Range& r0 = cx.range.at(refs[0]);
+                    if (std::abs(mp.inverse(r1[1]) - mp.inverse(r1[0])) <= std::abs(r0[1] - r0[0]) + 1e-9) { ec = &e->second; on = i; }
+                    break;
+                }
+    const double q1 = ec ? at_end(refs[1], c0) : 0;
+    const double q0 = c0 == 0 ? in.f64() : ec ? ec->maps[on].inverse(q1) + 0.0 : at_end(refs[0], c0);  // + 0.0: no -0
     auto line_or_circle = [&](std::uint32_t ref) { const std::uint16_t t = cx.curve_type(ref); return t == 150 || t == 151; };
     std::int32_t span = 1;
     if (c0 == 0 && !line_or_circle(refs[0]) && !((cd & 0x80) && refs.size() > 1 && line_or_circle(refs[1]))) span = in.i32();
     qs.push_back({refs[0], q0});
     std::size_t next = 1;
-    if (cd & 0x80) { if (shared) qs.push_back({refs[1], c0 == 0 || narrower ? q0 : at_end(refs[1], c0)}); next = 2; }
+    if (cd & 0x80) { if (shared) qs.push_back({refs[1], c0 == 0 ? q0 : ec ? q1 : at_end(refs[1], c0)}); next = 2; }
     const int c1 = cd & 0x80 ? (cd & 3) : (cd >> 4 & 3);
     if (next < refs.size() && (c1 == 1 || c1 == 2) && cx.range.count(refs[next])) qs.push_back({refs[next], at_end(refs[next], c1)});
     in.k = in.b.size;
@@ -655,7 +714,7 @@ std::vector<CanonicalRecord> canonical_records(const Stream& s, const CompactLay
                 const Record& r = recs[i];
                 if (r.type != 210 || !out[i].error.empty() || out[i].c.refs.empty() || out[i].c.payload.size() < 40 || cx.box.count(r.id)) continue;
                 std::uint32_t prof = out[i].c.refs[0];
-                if (auto f = cx.first.find(prof); f != cx.first.end()) prof = f->second;  // an edge curve: its first curve
+                if (auto e = cx.edge_curve.find(prof); e != cx.edge_curve.end()) prof = e->second.refs.at(0);  // an edge curve: its first curve
                 auto rg = cx.range.find(prof);
                 if (rg == cx.range.end()) continue;
                 const std::uint8_t* q = out[i].c.payload.data();
