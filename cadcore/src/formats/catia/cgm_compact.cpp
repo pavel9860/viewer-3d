@@ -601,7 +601,7 @@ Canonical canonical_in(const Record& r, const CompactLayout& L, Ctx* cx) {
                 // boxes in the p-curves' parameters: cone as stored; sphere and torus store angles, their
                 // parameters are arc lengths (u = R a, v = r b)
                 auto at = [&](int i) { return load_f64_le(o.p.data() + 8 * i); };
-                if (r.type == 202 && o.p.size() == 184) cx->box[r.id] = {at(14), at(15), at(16), at(17)};
+                if (r.type == 202 && o.p.size() == 184) cx->box[r.id] = {at(14) * at(18), at(15) * at(18), at(20), at(17)};
                 if (r.type == 203 && o.p.size() >= 17 * 8) cx->box[r.id] = {at(13) * at(12), at(14) * at(12), at(15) * at(12), at(16) * at(12)};
                 if (r.type == 204 && o.p.size() >= 18 * 8) cx->box[r.id] = {at(14) * at(12), at(15) * at(12), at(16) * at(13), at(17) * at(13)};
             }

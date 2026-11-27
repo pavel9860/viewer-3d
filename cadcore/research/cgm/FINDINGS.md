@@ -272,6 +272,12 @@ runs unchanged on canonical records. Reference transcoder: `spike/c11.py`.
   part-a340: failed 3 -> 0, open edges 31 -> 0, volume 49,707 vs stored 50,576; its area stays 1.74x
   stored, nearly all on its 98 NURBS faces, whose meshes lie on the stored surface but cover it about
   twice (trimming, open).
+- 2012+ cone boxes for derived values: u = stored angles times su, v starts at the reference value
+  (field 20; 0), not the stored v0 (the apex). a motor part: kernel failed faces 530 -> 29, open edges
+  6,159 -> 331; 410 2012+ parts: failed 3,539 -> 3,324.
+- Open: 2012+ NURBS derived lines use a box from the trailing block, not the knots (part-a340: true
+  u = 0, block starts 0 12.83 0 12.5; knots start -15.1); the block layout varies with its leading
+  ints (05050505: box = knots; others differ) and is not decoded yet.
 - All newer kinds (4, 5, 9, 10, 11, 12) are emitted by default (kernel support, 2026-11-27); fillet
   edges meet within 1.3e-6 of the part diagonal (kernel BREP_DEBUG=gaps). Default: 479,480 -> 487,731 faces; no part loses faces.
 - Results (155 as IR p-curve kind 5, `--pending`): 488,806 -> 489,893 faces, 1,109 -> 1,141
