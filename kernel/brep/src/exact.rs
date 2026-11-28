@@ -1,6 +1,6 @@
 //! Robust orientation predicates: floating-point filter, then Shewchuk-style staged evaluation
 //! (exact products of rounded differences, first-order tail correction) and an allocation-free exact
-//! fallback on fixed stack expansions. Signs are always exact.
+//! fallback on fixed stack expansions (in-circle: on growable expansions). Signs are always exact.
 
 const EPS: f64 = 1.1102230246251565e-16; // 2^-53
 
@@ -149,16 +149,38 @@ pub fn orient3d(a: [f64; 3], b: [f64; 3], c: [f64; 3], p: [f64; 3]) -> (i8, u8) 
     (orient3d_exact(a, b, c, p), 3)
 }
 
+/// growable expansion arithmetic (simple and obviously exact; for the rare exact stage of the larger predicates)
+fn grow(e: &[f64], b: f64) -> Vec<f64> { let mut q = b; let mut h = vec![]; for &x in e { let (s, er) = two_sum(q, x); if er != 0.0 { h.push(er); } q = s; } h.push(q); h }
+fn add(e: &[f64], f: &[f64]) -> Vec<f64> { f.iter().fold(e.to_vec(), |r, &x| grow(&r, x)) }
+fn mulv(e: &[f64], f: &[f64]) -> Vec<f64> { let mut r = vec![]; for &b in f { let mut s = vec![]; for &x in e { let (p, er) = two_prod(x, b); s = grow(&s, er); s = grow(&s, p); } r = add(&r, &s); } r }
+fn sgn(e: &[f64]) -> i8 { e.iter().rev().find(|x| **x != 0.0).map_or(0, |x| sg(*x)) }
+
+/// exact sign of the in-circle determinant: > 0 when d lies inside the circle through a, b, c (counter-clockwise)
+pub fn incircle_exact(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> i8 {
+    let df = |p: [f64; 2]| (two_diff(p[0], d[0]).to_vec(), two_diff(p[1], d[1]).to_vec());
+    let ((ax, ay), (bx, by), (cx, cy)) = (df(a), df(b), df(c));
+    let lift = |x: &[f64], y: &[f64]| add(&mulv(x, x), &mulv(y, y));
+    let minor = |x1: &[f64], y1: &[f64], x2: &[f64], y2: &[f64]| { let r: Vec<f64> = mulv(y1, x2).iter().map(|v| -v).collect(); add(&mulv(x1, y2), &r) };
+    let t = [mulv(&lift(&ax, &ay), &minor(&bx, &by, &cx, &cy)), mulv(&lift(&bx, &by), &minor(&cx, &cy, &ax, &ay)), mulv(&lift(&cx, &cy), &minor(&ax, &ay, &bx, &by))];
+    sgn(&add(&add(&t[0], &t[1]), &t[2]))
+}
+
+/// adaptive in-circle (Shewchuk's first-stage bound, then exact); returns (sign, stage: 0 filter, 3 exact)
+pub fn incircle(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> (i8, u8) {
+    let (adx, ady, bdx, bdy, cdx, cdy) = (a[0] - d[0], a[1] - d[1], b[0] - d[0], b[1] - d[1], c[0] - d[0], c[1] - d[1]);
+    let (al, bl, cl) = (adx * adx + ady * ady, bdx * bdx + bdy * bdy, cdx * cdx + cdy * cdy);
+    let det = al * (bdx * cdy - cdx * bdy) + bl * (cdx * ady - adx * cdy) + cl * (adx * bdy - bdx * ady);
+    let perm = ((bdx * cdy).abs() + (cdx * bdy).abs()) * al + ((cdx * ady).abs() + (adx * cdy).abs()) * bl + ((adx * bdy).abs() + (bdx * ady).abs()) * cl;
+    if det.abs() > (10.0 + 96.0 * EPS) * EPS * perm { return (sg(det), 0); }
+    (incircle_exact(a, b, c, d), 3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     struct Rng(u64);
     impl Rng { fn f(&mut self) -> f64 { self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15); let mut z = self.0; z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9); z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB); ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64 } }
-    /// independent reference: grow-expansion arithmetic on Vecs (simple, slow, obviously exact)
-    fn grow(e: &[f64], b: f64) -> Vec<f64> { let mut q = b; let mut h = vec![]; for &x in e { let (s, er) = two_sum(q, x); if er != 0.0 { h.push(er); } q = s; } h.push(q); h }
-    fn add(e: &[f64], f: &[f64]) -> Vec<f64> { f.iter().fold(e.to_vec(), |r, &x| grow(&r, x)) }
-    fn mulv(e: &[f64], f: &[f64]) -> Vec<f64> { let mut r = vec![]; for &b in f { let mut s = vec![]; for &x in e { let (p, er) = two_prod(x, b); s = grow(&s, er); s = grow(&s, p); } r = add(&r, &s); } r }
-    fn sgn(e: &[f64]) -> i8 { e.iter().rev().find(|x| **x != 0.0).map_or(0, |x| sg(*x)) }
+    // reference: the growable expansion arithmetic (independent of the fixed-buffer stages under test)
     fn d(a: f64, b: f64) -> Vec<f64> { two_diff(a, b).to_vec() }
     fn ref2(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> i8 { let r: Vec<f64> = mulv(&d(b[1], a[1]), &d(c[0], a[0])).iter().map(|x| -x).collect(); sgn(&add(&mulv(&d(b[0], a[0]), &d(c[1], a[1])), &r)) }
     #[test]
@@ -180,6 +202,23 @@ mod tests {
             let (s, t) = (r.f(), r.f());
             let p = [0, 1, 2].map(|k| a[k] + s * (b[k] - a[k]) + t * (c[k] - a[k]));
             assert_eq!(orient3d(a, b, c, p).0, orient3d_exact(a, b, c, p));
+        }
+    }
+    #[test]
+    fn incircle_matches_exact_near_cocircular() {
+        let mut r = Rng(3);
+        for _ in 0..50_000 {
+            // three points on a circle and a fourth on it (rounded), inside or outside by a few ulps
+            let (cx, cy, rad) = (r.f(), r.f(), 0.1 + r.f());
+            let p = |t: f64| [cx + rad * (t * 6.283185307179586).cos(), cy + rad * (t * 6.283185307179586).sin()];
+            let mut t = [r.f(), r.f(), r.f()];
+            t.sort_by(f64::total_cmp);
+            let (a, b, c, d) = (p(t[0]), p(t[1]), p(t[2]), p(r.f()));
+            let e = incircle_exact(a, b, c, d);
+            assert_eq!(incircle(a, b, c, d).0, e);
+            // far inside and far outside agree with the plain determinant
+            assert_eq!(incircle(a, b, c, [cx, cy]).0, 1);
+            assert_eq!(incircle(a, b, c, [cx + 3.0 * rad, cy]).0, -1);
         }
     }
 }

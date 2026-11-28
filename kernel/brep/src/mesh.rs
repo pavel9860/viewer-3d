@@ -1,11 +1,18 @@
-//! Exact-surface volume integration over faces triangulated in parameter space.
+//! Exact-surface integrals (enclosed volume, area) over faces triangulated in parameter space.
 use crate::geom::*;
 use crate::topo::*;
 use crate::trim::{area, Trim, P2};
 
 
-/// degree-5 Dunavant rule for (1/3) ∫∫ p · (Su x Sv) over a UV triangle (signed by its UV orientation)
-fn rule(s: &dyn Surf, a: P2, b: P2, c: P2) -> f64 {
+/// integrand over the parameter plane, from the surface point and derivatives
+type Integrand = fn(&D2) -> f64;
+/// volume element: (1/3) p . (Su x Sv) (divergence theorem)
+fn dvol(d: &D2) -> f64 { dot(d.p, cross(d.u, d.v)) / 3.0 }
+/// area element: |Su x Sv|
+fn darea(d: &D2) -> f64 { norm(cross(d.u, d.v)) }
+
+/// degree-5 Dunavant rule for ∫∫ g over a UV triangle (signed by its UV orientation)
+fn rule(s: &dyn Surf, g: Integrand, a: P2, b: P2, c: P2) -> f64 {
     const R: [(f64, f64, f64); 7] = [
         (1.0 / 3.0, 1.0 / 3.0, 0.225),
         (0.059715871789770, 0.470142064105115, 0.132394152788506), (0.470142064105115, 0.059715871789770, 0.132394152788506), (0.470142064105115, 0.470142064105115, 0.132394152788506),
@@ -15,19 +22,19 @@ fn rule(s: &dyn Surf, a: P2, b: P2, c: P2) -> f64 {
     R.iter().map(|&(l1, l2, w)| {
         let l3 = 1.0 - l1 - l2;
         let d = s.ev(l1 * a[0] + l2 * b[0] + l3 * c[0], l1 * a[1] + l2 * b[1] + l3 * c[1]);
-        w * dot(d.p, cross(d.u, d.v)) / 3.0
+        w * g(&d)
     }).sum::<f64>() * jac
 }
 /// adaptive quadrature: a triangle is split into 4 while the children's sum differs from its own rule by more than
 /// `tol` (absolute, shared out over the children); independent of the parameterization's scale
-fn integrate(s: &dyn Surf, a: P2, b: P2, c: P2, whole: f64, tol: f64, depth: u32) -> f64 {
+fn integrate(s: &dyn Surf, g: Integrand, a: P2, b: P2, c: P2, whole: f64, tol: f64, depth: u32) -> f64 {
     let m = |p: P2, q: P2| [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
     let (ab, bc, ca) = (m(a, b), m(b, c), m(c, a));
     let k = [(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)];
-    let parts = k.map(|t| rule(s, t.0, t.1, t.2));
+    let parts = k.map(|t| rule(s, g, t.0, t.1, t.2));
     let sum: f64 = parts.iter().sum();
     if depth >= 10 || (sum - whole).abs() <= tol { return sum; }
-    (0..4).map(|i| integrate(s, k[i].0, k[i].1, k[i].2, parts[i], tol / 4.0, depth + 1)).sum()
+    (0..4).map(|i| integrate(s, g, k[i].0, k[i].1, k[i].2, parts[i], tol / 4.0, depth + 1)).sum()
 }
 
 pub fn face_trim(b: &Body, f: Id<Face>) -> Trim {
@@ -36,7 +43,14 @@ pub fn face_trim(b: &Body, f: Id<Face>) -> Trim {
 }
 
 /// volume enclosed by a face set (divergence theorem); also reports faces whose triangulation lost area
-pub fn volume(b: &Body, faces: &[Id<Face>]) -> (f64, usize) {
+pub fn volume(b: &Body, faces: &[Id<Face>]) -> (f64, usize) { integral(b, faces, dvol, false) }
+
+/// area of a face set; also reports faces whose triangulation lost area
+pub fn area_of(b: &Body, faces: &[Id<Face>]) -> (f64, usize) { integral(b, faces, darea, true) }
+
+/// ∫∫ g over the faces' trimmed parameter regions; `unsigned`: each face's integral taken positive (the UV
+/// orientation of a reversed face is mirrored)
+fn integral(b: &Body, faces: &[Id<Face>], g: Integrand, unsigned: bool) -> (f64, usize) {
     let mut bad = 0;
     let v = faces.iter().map(|&f| {
         let t = face_trim(b, f);
@@ -55,9 +69,9 @@ pub fn volume(b: &Body, faces: &[Id<Face>]) -> (f64, usize) {
                 if let Ok(d) = std::env::var("BREP_DUMP") { let _ = std::fs::write(format!("{d}/face{}.txt", b.faces.get(f).origin.src), std::iter::once(o).chain(hs.iter()).map(|r| r.iter().map(|q| format!("{} {}", q[0], q[1])).collect::<Vec<_>>().join(";")).collect::<Vec<_>>().join("\n")); }
                 if crate::debug("mesh") { eprintln!("triangulation lost area: face src {} outer {} pts, {} holes, area {want:.3e} got {got:.3e}", b.faces.get(f).origin.src, o.len(), hs.len()); }
             }
-            sum += tris.iter().map(|tr| { let (a, b, c) = (t.raw(pts[tr[0]]), t.raw(pts[tr[1]]), t.raw(pts[tr[2]])); integrate(s, a, b, c, rule(s, a, b, c), 1e-12, 0) }).sum::<f64>();
+            sum += tris.iter().map(|tr| { let (a, b, c) = (t.raw(pts[tr[0]]), t.raw(pts[tr[1]]), t.raw(pts[tr[2]])); integrate(s, g, a, b, c, rule(s, g, a, b, c), 1e-12, 0) }).sum::<f64>();
         }
-        sum
+        if unsigned { sum.abs() } else { sum }
     }).sum();
     (v, bad)
 }

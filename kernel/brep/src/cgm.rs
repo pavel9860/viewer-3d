@@ -158,10 +158,15 @@ impl Curve3 {
     }
 }
 
-/// surface derivatives by central differences of `f`
+/// first and second surface derivatives by central differences of `f` on one 3x3 stencil (step 1e-5 of the
+/// parameter's scale: truncation ~h^2 for both orders, rounding ~eps/h^2 ~ 1e-6 relative for the second)
 fn diff(f: impl Fn(f64, f64) -> V, u: f64, v: f64) -> D2 {
-    let (hu, hv) = (1e-6 * (1.0 + u.abs()), 1e-6 * (1.0 + v.abs()));
-    D2 { p: f(u, v), u: mulv(sub(f(u + hu, v), f(u - hu, v)), 0.5 / hu), v: mulv(sub(f(u, v + hv), f(u, v - hv)), 0.5 / hv), uu: ZERO, uv: ZERO, vv: ZERO }
+    let (hu, hv) = (1e-5 * (1.0 + u.abs()), 1e-5 * (1.0 + v.abs()));
+    let p = f(u, v);
+    let (pu, mu, pv, mv) = (f(u + hu, v), f(u - hu, v), f(u, v + hv), f(u, v - hv));
+    let (pp, pm, mp, mm) = (f(u + hu, v + hv), f(u + hu, v - hv), f(u - hu, v + hv), f(u - hu, v - hv));
+    let second = |a: V, b: V, h: f64| mulv(sub(addv(a, b), mulv(p, 2.0)), 1.0 / (h * h));
+    D2 { p, u: mulv(sub(pu, mu), 0.5 / hu), v: mulv(sub(pv, mv), 0.5 / hv), uu: second(pu, mu, hu), uv: mulv(sub(addv(pp, mm), addv(pm, mp)), 0.25 / (hu * hv)), vv: second(pv, mv, hv) }
 }
 
 /// p = o + u U + v V
@@ -188,7 +193,7 @@ impl Surf for CgmCyl {
         let a = u / self.su;
         let (s, c) = a.sin_cos();
         let k = self.r / self.su;
-        D2 { p: lin(self.o, &[(self.x, self.r * c), (self.y, self.r * s), (self.z, v)]), u: lin(ZERO, &[(self.x, -k * s), (self.y, k * c)]), v: self.z, uu: ZERO, uv: ZERO, vv: ZERO }
+        D2 { p: lin(self.o, &[(self.x, self.r * c), (self.y, self.r * s), (self.z, v)]), u: lin(ZERO, &[(self.x, -k * s), (self.y, k * c)]), v: self.z, uu: lin(ZERO, &[(self.x, -k * c / self.su), (self.y, -k * s / self.su)]), uv: ZERO, vv: ZERO }
     }
     fn dom(&self) -> [f64; 4] { [-1e9, 1e9, -1e9, 1e9] }
     fn periods(&self) -> [f64; 2] { [std::f64::consts::TAU * self.su, 0.0] }
@@ -199,7 +204,10 @@ impl Surf for CgmSphere {
         let (a, b) = (u / self.k, v / self.k);
         let ((sa, ca), (sb, cb)) = (a.sin_cos(), b.sin_cos());
         let rim = lin(ZERO, &[(self.a, ca), (self.b, sa)]);
-        D2 { p: addv(self.o, addv(mulv(rim, cb), mulv(self.c, sb))), u: mulv(lin(ZERO, &[(self.a, -sa), (self.b, ca)]), cb / self.k), v: mulv(addv(mulv(rim, -sb), mulv(self.c, cb)), 1.0 / self.k), uu: ZERO, uv: ZERO, vv: ZERO }
+        let rim_a = lin(ZERO, &[(self.a, -sa), (self.b, ca)]);
+        let k2 = 1.0 / (self.k * self.k);
+        D2 { p: addv(self.o, addv(mulv(rim, cb), mulv(self.c, sb))), u: mulv(rim_a, cb / self.k), v: mulv(addv(mulv(rim, -sb), mulv(self.c, cb)), 1.0 / self.k),
+             uu: mulv(rim, -cb * k2), uv: mulv(rim_a, -sb * k2), vv: mulv(addv(mulv(rim, cb), mulv(self.c, sb)), -k2) }
     }
     fn dom(&self) -> [f64; 4] { [-1e9, 1e9, -1e9, 1e9] }
     fn periods(&self) -> [f64; 2] { [std::f64::consts::TAU * self.k, 0.0] }
@@ -212,7 +220,9 @@ impl Surf for CgmCone {
         let (sa, ca) = self.a.sin_cos();
         let dir = lin(ZERO, &[(self.x, ct), (self.y, st)]);
         let w = self.r0 + v * ca;
-        D2 { p: addv(self.o, addv(mulv(dir, w), mulv(self.z, v * sa))), u: mulv(lin(ZERO, &[(self.x, -st), (self.y, ct)]), w / self.su), v: addv(mulv(dir, ca), mulv(self.z, sa)), uu: ZERO, uv: ZERO, vv: ZERO }
+        let dir_t = lin(ZERO, &[(self.x, -st), (self.y, ct)]);
+        D2 { p: addv(self.o, addv(mulv(dir, w), mulv(self.z, v * sa))), u: mulv(dir_t, w / self.su), v: addv(mulv(dir, ca), mulv(self.z, sa)),
+             uu: mulv(dir, -w / (self.su * self.su)), uv: mulv(dir_t, ca / self.su), vv: ZERO }
     }
     fn dom(&self) -> [f64; 4] { [-1e9, 1e9, -1e9, 1e9] }
     fn periods(&self) -> [f64; 2] { [std::f64::consts::TAU * self.su, 0.0] }
@@ -224,7 +234,9 @@ impl Surf for CgmTorus {
         let ((sa, ca), (sb, cb)) = (a.sin_cos(), b.sin_cos());
         let dir = lin(ZERO, &[(self.x, ca), (self.y, sa)]);
         let w = self.big + self.r * cb;
-        D2 { p: addv(self.o, addv(mulv(dir, w), mulv(self.z, self.r * sb))), u: mulv(lin(ZERO, &[(self.x, -sa), (self.y, ca)]), w / self.big), v: addv(mulv(dir, -sb), mulv(self.z, cb)), uu: ZERO, uv: ZERO, vv: ZERO }
+        let dir_a = lin(ZERO, &[(self.x, -sa), (self.y, ca)]);
+        D2 { p: addv(self.o, addv(mulv(dir, w), mulv(self.z, self.r * sb))), u: mulv(dir_a, w / self.big), v: addv(mulv(dir, -sb), mulv(self.z, cb)),
+             uu: mulv(dir, -w / (self.big * self.big)), uv: mulv(dir_a, -sb / self.big), vv: mulv(addv(mulv(dir, cb), mulv(self.z, sb)), -1.0 / self.r) }
     }
     fn dom(&self) -> [f64; 4] { [-1e9, 1e9, -1e9, 1e9] }
     fn periods(&self) -> [f64; 2] { [std::f64::consts::TAU * self.big, std::f64::consts::TAU * self.r] }
@@ -234,7 +246,7 @@ impl Surf for CgmTorus {
 /// p = C(u) + v d
 pub struct CgmExtrusion { pub c: Curve3, pub d: V }
 impl Surf for CgmExtrusion {
-    fn ev(&self, u: f64, v: f64) -> D2 { let mut e = diff(|u, v| addv(self.c.at(u), mulv(self.d, v)), u, v); e.v = self.d; e }
+    fn ev(&self, u: f64, v: f64) -> D2 { let mut e = diff(|u, v| addv(self.c.at(u), mulv(self.d, v)), u, v); e.v = self.d; e.uv = ZERO; e.vv = ZERO; e }
     fn dom(&self) -> [f64; 4] { self.c.dom_u() }
     fn uv_of(&self, p: V) -> [f64; 2] { uv_newton(self, p) }
 }
@@ -280,6 +292,7 @@ impl Surf for CgmRuled {
         let mut e = diff(|u, v| { let (a, b) = ab(u); addv(a, mulv(sub(b, a), v)) }, u, v);
         let (a, b) = ab(u);
         e.v = sub(b, a);
+        e.vv = ZERO;
         e
     }
     fn dom(&self) -> [f64; 4] { let (a, b) = self.h.range(); [a, b, -1e9, 1e9] }
@@ -290,11 +303,8 @@ impl Surf for CgmRuled {
 pub struct CgmOffset { pub base: Arc<dyn Surf>, pub d: f64 }
 impl Surf for CgmOffset {
     fn ev(&self, u: f64, v: f64) -> D2 {
-        let n = |u: f64, v: f64| { let e = self.base.ev(u, v); (e.p, e.u, e.v, unit(cross(e.u, e.v))) };
-        let (p, su, sv, nn) = n(u, v);
-        let h = 1e-6 * (1.0 + u.abs() + v.abs());
-        let (nu, nv) = (sub(n(u + h, v).3, n(u - h, v).3), sub(n(u, v + h).3, n(u, v - h).3));
-        D2 { p: addv(p, mulv(nn, self.d)), u: addv(su, mulv(nu, self.d / (2.0 * h))), v: addv(sv, mulv(nv, self.d / (2.0 * h))), uu: ZERO, uv: ZERO, vv: ZERO }
+        let at = |u: f64, v: f64| { let e = self.base.ev(u, v); addv(e.p, mulv(unit(cross(e.u, e.v)), self.d)) };
+        diff(at, u, v)
     }
     fn dom(&self) -> [f64; 4] { self.base.dom() }
     fn periods(&self) -> [f64; 2] { self.base.periods() }
@@ -576,5 +586,33 @@ mod tests {
         m.surfaces.push(Arc::new(CgmPlane { o: [0.0; 3], u: [1.0, 0.0, 0.0], v: [0.0, 1.0, 0.0] }));
         m.pcurves.push((0, Arc::new(PCurve::Line { o: [1.0, 2.0], d: [1.0, 0.0] })));
         assert!(close(m.curve3(&[1.0, 0.0]).unwrap().0.at(2.0), [3.0, 2.0, 0.0]));
+    }
+    /// every surface's derivatives (both orders) agree with differences of its own points
+    #[test]
+    fn surface_derivatives_match_differences() {
+        let (x, y) = ([0.6, 0.8, 0.0], [-0.8, 0.6, 0.0]);
+        let z = cross(x, y);
+        let surfs: Vec<(&str, Arc<dyn Surf>)> = vec![
+            ("cylinder", Arc::new(CgmCyl { o: [1.0, 2.0, 3.0], x, y, z, r: 2.5, su: 4.0 })),
+            ("sphere", Arc::new(CgmSphere { o: [1.0, 0.0, 0.0], a: mulv(x, 3.0), b: mulv(y, 3.0), c: mulv(z, 3.0), k: 3.0 })),
+            ("cone", Arc::new(CgmCone { o: [0.0; 3], x, y, z, a: 0.4, r0: 1.5, su: 2.0 })),
+            ("torus", Arc::new(CgmTorus { o: [0.0; 3], x, y, z, big: 5.0, r: 1.5 })),
+            ("offset", Arc::new(CgmOffset { base: Arc::new(CgmCyl { o: [0.0; 3], x, y, z, r: 2.0, su: 2.0 }), d: 0.5 })),
+        ];
+        for (name, s) in &surfs {
+            for (u, v) in [(0.3, 0.2), (1.7, -0.4), (-2.2, 0.9)] {
+                let (d, h) = (s.ev(u, v), 1e-4);
+                let p = |u: f64, v: f64| s.ev(u, v).p;
+                let fd = |a: V, b: V, sc: f64| mulv(sub(a, b), sc);
+                let want = [
+                    ("u", d.u, fd(p(u + h, v), p(u - h, v), 0.5 / h)),
+                    ("v", d.v, fd(p(u, v + h), p(u, v - h), 0.5 / h)),
+                    ("uu", d.uu, fd(addv(p(u + h, v), p(u - h, v)), mulv(d.p, 2.0), 1.0 / (h * h))),
+                    ("vv", d.vv, fd(addv(p(u, v + h), p(u, v - h)), mulv(d.p, 2.0), 1.0 / (h * h))),
+                    ("uv", d.uv, fd(addv(p(u + h, v + h), p(u - h, v - h)), addv(p(u + h, v - h), p(u - h, v + h)), 0.25 / (h * h))),
+                ];
+                for (k, got, fdv) in want { assert!(norm(sub(got, fdv)) < 1e-4 * (1.0 + norm(fdv)), "{name} {k} at ({u}, {v}): {got:?} vs {fdv:?}"); }
+            }
+        }
     }
 }

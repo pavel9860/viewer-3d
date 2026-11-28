@@ -9,6 +9,9 @@ use brep::cgm_mesh::{shown_shells, stats, tessellate};
 use std::io::Write;
 use std::time::Instant;
 
+/// threads (the resource limit: at most 4)
+const WORKERS: usize = 4;
+
 /// a JSON number with 6 decimals, null when not finite
 fn num(x: f64) -> String { if x.is_finite() { format!("{x:.6}") } else { "null".into() } }
 
@@ -38,25 +41,25 @@ fn main() {
         };
         let solids: Vec<usize> = (0..m.shells.len()).filter(|&i| m.shells[i].solid).collect();
         // sag relative to the size of the solids' edge end points
-        let b = stats(&tessellate(&m, f64::MAX, &solids)).bbox;
+        let b = brep::cgm_mesh::edge_bbox(&m, &solids);
         let diag = ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt();
         let sag = sag_rel * if diag.is_finite() && diag > 0.0 { diag } else { 1.0 };
         if bodies {
             for bd in &m.bodies {
                 let sh: Vec<usize> = bd.shells.iter().copied().filter(|&i| m.shells[i].solid).collect();
-                let st = stats(&tessellate(&m, sag, &sh));
+                let st = stats(&tessellate(&m, sag, &sh, WORKERS));
                 println!("{{\"ir\":\"{f}\",\"body\":{},\"flags\":{},\"solid_shells\":{},\"volume\":{:.6},\"open_edges\":{}}}", bd.id, bd.flags, sh.len(), st.volume, st.open_edges);
             }
             continue;
         }
         if brep::debug("gaps") { for (k, (n, g)) in brep::cgm_mesh::edge_gaps(&m) { eprintln!("{f}: gap (surface, p-curve) {:?} x {:?}: {n} edges, max {:.1e} of diag", k[0], k[1], g / sag * sag_rel); } }
         let shells = if all { solids.clone() } else { shown_shells(&m, sheets) };
-        let mesh = tessellate(&m, sag, &shells);
+        let mesh = tessellate(&m, sag, &shells, WORKERS);
         let s = stats(&mesh);
         let bb = s.bbox;
         let bb = bb.map(num);
-        println!("{{\"ir\":\"{f}\",\"solids\":{},\"shells\":{},\"faces\":{},\"skipped\":{},\"failed\":{},\"tris\":{},\"area\":{},\"volume\":{},\"open_edges\":{},\"nonmanifold_edges\":{},\"bbox\":[{}],\"ms\":{:.1}}}",
-            solids.len(), shells.len(), m.faces.len(), m.skipped.len(), mesh.failed.len(), s.tris, num(s.area), num(s.volume), s.open_edges, s.nonmanifold_edges, bb.join(","), t0.elapsed().as_secs_f64() * 1e3);
+        println!("{{\"ir\":\"{f}\",\"solids\":{},\"shells\":{},\"faces\":{},\"skipped\":{},\"failed\":{},\"coarse\":{},\"tris\":{},\"area\":{},\"volume\":{},\"open_edges\":{},\"nonmanifold_edges\":{},\"bbox\":[{}],\"ms\":{:.1}}}",
+            solids.len(), shells.len(), m.faces.len(), m.skipped.len(), mesh.failed.len(), mesh.coarse.len(), s.tris, num(s.area), num(s.volume), s.open_edges, s.nonmanifold_edges, bb.join(","), t0.elapsed().as_secs_f64() * 1e3);
         if brep::debug("orient") {
             match brep::cgm_mesh::orientation_fix(&mesh) {
                 Some(fix) => for (f, x) in mesh.faces.iter().zip(fix) { eprintln!("orient {} {} {} {} {} {}", f.0, f.1, f.2, f.3, f.4, x as i32); },
@@ -70,7 +73,7 @@ fn main() {
         }
         if brep::debug("open") {
             let c = brep::cgm_mesh::open_causes(&mesh);
-            eprintln!("open edges: {} on edges whose other face is not meshed ({} edges), {} on edges of two faces ({} edges: {:?}), {} inside faces", c.lone, c.lone_edges.len(), c.joined, c.joined_edges.len(), &c.joined_edges[..c.joined_edges.len().min(20)], c.inside);
+            eprintln!("open edges: {} on edges whose other face is not meshed ({} edges), {} on edges of two faces ({} edges: {:?}), {} inside faces {:?}", c.lone, c.lone_edges.len(), c.joined, c.joined_edges.len(), &c.joined_edges[..c.joined_edges.len().min(20)], c.inside, c.inside_faces);
         }
         if brep::debug("faces") {
             // largest faces by mesh area, with surface kind and p-curve kinds
@@ -91,6 +94,7 @@ fn main() {
             }
         }
         for (id, why) in &mesh.failed { eprintln!("{f}: face {id}: {why}"); }
+        for (id, dev) in &mesh.coarse { eprintln!("{f}: face {id}: coarse (refinement budget ran out, deviation {:.2e} of sag {sag:.2e})", dev); }
         if let Some(out) = &stl {
             let mut w = std::io::BufWriter::new(std::fs::File::create(out).expect("cannot create the STL"));
             w.write_all(&[0u8; 80]).unwrap();

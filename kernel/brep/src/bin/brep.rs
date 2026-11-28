@@ -96,7 +96,8 @@ fn unmatched(r: &Body, a: &Body, shell: &[Id<Face>], src: &Body) {
     } }
 }
 
-/// tessellate every shell; closed shells must give closed meshes. Volume vs the exact face integral is an indicator.
+/// tessellate every shell; closed shells must give closed meshes. Volume and area vs the exact face integrals are
+/// indicators (area per face catches facets that cut across their surface, which volume does not).
 fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
     use brep::tess::{mesh_volume, open_edges, tessellate, Opts};
     let Some(mut im) = import(f) else { return 1 };
@@ -110,6 +111,7 @@ fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
     let o = Opts { chord, ..Default::default() };
     let (mut tris, mut open, mut nonman, mut empty, mut coarse, mut dev, mut vrel) = (0, 0, 0, 0, 0, 0.0f64, 0.0f64);
     let (mut mv, mut ev) = (0.0, 0.0);
+    let (mut ma, mut ea, mut arel) = (0.0, 0.0, 0.0f64);
     let mut all = brep::tess::Mesh::default();
     for (_, sh) in b.shells.iter() {
         let (m, st) = tessellate(b, &sh.faces, &o, WORKERS);
@@ -120,6 +122,11 @@ fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
             all.face.extend(m.face.iter().map(|x| x + fbase));
         }
         tris += m.tri.len();
+        // area per face: mesh vs exact
+        let mut fa = vec![0.0f64; sh.faces.len()];
+        for (t, &fi) in m.tri.iter().zip(&m.face) { let [p, q, r] = t.map(|i| m.pos[i as usize]); fa[fi as usize] += 0.5 * norm(cross(sub(q, p), sub(r, p))); }
+        let ex = brep::par::map(sh.faces.len(), WORKERS, |i| mesh::area_of(b, &sh.faces[i..i + 1]).0);
+        for (a, e) in fa.iter().zip(&ex) { ma += a; ea += e; arel = arel.max((a - e).abs() / e.abs().max(1e-30)); }
         empty += st.empty;
         coarse += st.coarse;
         dev = dev.max(st.max_dev);
@@ -145,8 +152,8 @@ fn mesh_file(f: &str, chord: f64, out: Option<&str>) -> usize {
         write_mesh(dir, base(f), &all, chord, &lv, im.diag);
     }
     let bad = open + empty + coarse;
-    println!("{:<26} {} faces -> {tris} triangles in {t:.0} ms | open edges {open} non-manifold {nonman} | empty faces {empty} coarse {coarse} | max dev {:.1e} mm | volume mesh/exact {:.6} (worst shell rel {vrel:.1e}){sew_note}{lods}{}",
-        base(f), b.faces.len(), dev * im.diag, mv / ev, if bad > 0 { " FAIL" } else { "" });
+    println!("{:<26} {} faces -> {tris} triangles in {t:.0} ms | open edges {open} non-manifold {nonman} | empty faces {empty} coarse {coarse} | max dev {:.1e} mm | volume mesh/exact {:.6} (worst shell rel {vrel:.1e}) | area mesh/exact {:.6} (worst face rel {arel:.1e}){sew_note}{lods}{}",
+        base(f), b.faces.len(), dev * im.diag, mv / ev, ma / ea, if bad > 0 { " FAIL" } else { "" });
     bad
 }
 

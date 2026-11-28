@@ -22,6 +22,7 @@ pub mod p21;
 pub mod sew;
 pub mod simplify;
 pub mod par;
+pub mod refine;
 pub mod ssi;
 pub mod step;
 pub mod tess;
